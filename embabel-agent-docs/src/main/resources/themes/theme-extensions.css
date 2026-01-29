@@ -5,19 +5,19 @@
 /* ==== High-contrast code palette (override safely) ==== */
 :root {
     /* tweak these with your site colors */
-    --code-fg: #f8f8f2;
-    --code-bg: #1f1f24; /* a hair lighter than #1e1e1e for separation */
-    --code-border: #3d3d46;
+    --code-fg: #1f2937;
+    --code-bg: #f9fafb; /* light background for code */
+    --code-border: #e5e7eb;
 
-    /* token colors (no "navy") */
-    --code-kw: #ff79c6; /* keywords */
-    --code-str: #f1fa8c; /* strings */
-    --code-com: #8aa0c4; /* comments (brighter than #6272a4) */
-    --code-num: #bd93f9; /* numbers/literals */
-    --code-type: #8be9fd; /* class/type names */
-    --code-fn: #50fa7b; /* function names */
-    --code-meta: #ffb86c; /* annotations/@meta */
-    --code-var: #e6e6e6; /* variables/identifiers */
+    /* token colors (light theme) */
+    --code-kw: #dc2626; /* keywords - red */
+    --code-str: #059669; /* strings - green */
+    --code-com: #6b7280; /* comments - gray */
+    --code-num: #7c3aed; /* numbers/literals - purple */
+    --code-type: #2563eb; /* class/type names - blue */
+    --code-fn: #059669; /* function names - green */
+    --code-meta: #ea580c; /* annotations/@meta - orange */
+    --code-var: #1f2937; /* variables/identifiers - dark gray */
     --gutter: 20px;
 }
 
@@ -35,101 +35,101 @@
 /* Java-specific syntax highlighting fixes */
 .hljs-annotation,
 .hljs-meta {
-    color: #ffb86c !important; /* Orange for annotations like @Override */
+    color: var(--code-meta) !important; /* Orange for annotations like @Override */
 }
 
 .hljs-keyword {
-    color: #ff79c6 !important; /* Pink for keywords */
+    color: var(--code-kw) !important; /* Red for keywords */
 }
 
 .hljs-string {
-    color: #f1fa8c !important; /* Yellow for strings */
+    color: var(--code-str) !important; /* Green for strings */
 }
 
 .hljs-comment {
-    color: #6272a4 !important; /* Blue-gray for comments */
+    color: var(--code-com) !important; /* Gray for comments */
     font-style: italic;
 }
 
 .hljs-number {
-    color: #bd93f9 !important; /* Purple for numbers */
+    color: var(--code-num) !important; /* Purple for numbers */
 }
 
 .hljs-class .hljs-title,
 .hljs-type {
-    color: #8be9fd !important; /* Cyan for class names and types */
+    color: var(--code-type) !important; /* Blue for class names and types */
 }
 
 .hljs-function .hljs-title {
-    color: #50fa7b !important; /* Green for function names */
+    color: var(--code-fn) !important; /* Green for function names */
 }
 
 .hljs-variable,
 .hljs-name {
-    color: #f8f8f2 !important; /* Light gray for variables */
+    color: var(--code-var) !important; /* Dark gray for variables */
 }
 
 .hljs-attr {
-    color: #50fa7b !important; /* Green for attributes */
+    color: var(--code-fn) !important; /* Green for attributes */
 }
 
 .hljs-symbol,
 .hljs-bullet {
-    color: #8be9fd !important; /* Cyan for symbols */
+    color: var(--code-type) !important; /* Blue for symbols */
 }
 
 .hljs-built_in,
 .hljs-builtin-name {
-    color: #8be9fd !important; /* Cyan for built-ins */
+    color: var(--code-type) !important; /* Blue for built-ins */
 }
 
 .hljs-literal {
-    color: #bd93f9 !important; /* Purple for literals */
+    color: var(--code-num) !important; /* Purple for literals */
 }
 
 .hljs-params {
-    color: #ffb86c !important; /* Orange for parameters */
+    color: var(--code-meta) !important; /* Orange for parameters */
 }
 
 /* Generic syntax highlighting for non-hljs code */
 .token.annotation,
 .token.meta {
-    color: #ffb86c !important;
+    color: var(--code-meta) !important;
 }
 
 .token.keyword {
-    color: #ff79c6 !important;
+    color: var(--code-kw) !important;
 }
 
 .token.string {
-    color: #f1fa8c !important;
+    color: var(--code-str) !important;
 }
 
 .token.comment {
-    color: #6272a4 !important;
+    color: var(--code-com) !important;
     font-style: italic;
 }
 
 .token.number {
-    color: #bd93f9 !important;
+    color: var(--code-num) !important;
 }
 
 .token.class-name {
-    color: #8be9fd !important;
+    color: var(--code-type) !important;
 }
 
 .token.function {
-    color: #50fa7b !important;
+    color: var(--code-fn) !important;
 }
 
 /* Callouts */
 .conum[data-value] {
-    background-color: rgba(80, 160, 250, 0.8) !important;
-    color: #fff !important;
+    background-color: var(--code-kw) !important;
+    color: #ffffff !important;
 }
 
 .conum[data-value] * {
-    color: #fff !important;
+    color: #ffffff !important;
 }
 
 /* Base code blocks */
@@ -147,13 +147,9 @@ pre code {
 
 /* Inline code */
 code, tt {
-    background: linear-gradient(
-            to bottom,
-            #9f77cd 0%,
-            #7e64a7 100%
-    ) !important;
-    color: var(--code-fg) !important;
-    border: 0;
+    background: #f3f4f6 !important;
+    color: #1f2937 !important;
+    border: 1px solid #e5e7eb !important;
     padding: 0.15em 0.4em !important;
     border-radius: 4px !important;
 }
@@ -161,7 +157,9 @@ code, tt {
 /* Inline code inside a quoteblock */
 .quoteblock code,
 .quoteblock .monospaced {
-    background-color: #4b624b !important;
+    background-color: #f3f4f6 !important;
+    color: #1f2937 !important;
+    border: 1px solid #e5e7eb !important;
     padding: 0.15em 0.3em;
     border-radius: 3px;
 }
@@ -333,7 +331,7 @@ code, tt {
 
 /* Ensure links inside code don't turn "navy" */
 pre a, code a {
-    color: #fafafa !important;
+    color: var(--link-color) !important;
     text-decoration: underline;
 }
 
@@ -448,7 +446,7 @@ pre a, code a {
     z-index: 950;
     overflow-y: auto;
     overflow-x: auto;
-    background: #000;
+    background: #ffffff;
     padding: 1.25rem 1.5rem 1.25rem 1.5rem;
     box-sizing: border-box;
     scrollbar-gutter: stable;
@@ -473,11 +471,11 @@ pre a, code a {
 .literalblock {
     background: linear-gradient(
             135deg,
-            #131313 0%,
-            #181621 40%,
-            #161c22 100%
+            #f9fafb 0%,
+            #f3f4f6 40%,
+            #f9fafb 100%
     ) !important;
-    border: 1px solid #2a2a2a !important;
+    border: 1px solid #e5e7eb !important;
     border-radius: 8px;
     padding: 0.75rem; /* space around code */
 }
@@ -495,7 +493,7 @@ pre a, code a {
 .listingblock pre,
 .literalblock pre,
 pre.highlight {
-    background: #161413 !important;
+    background: #ffffff !important;
     border: 0 !important; /* inner border gone */
     border-radius: 8px;
     padding: 1rem 1.25rem;
@@ -525,7 +523,7 @@ pre.highlight, pre.highlight code {
 .literalblock pre,
 pre.highlight,
 pre.highlight code {
-    background: #161413 !important; /* inner code bg */
+    background: #ffffff !important; /* inner code bg */
     border-radius: 8px !important;
 }
 
@@ -606,7 +604,7 @@ pre.rouge .nl {
 
 colist td {
     padding: .25em 0;
-    color: #fafafa;
+    color: var(--text-color);
 }
 
 .admonitionblock td.icon [class^="fa icon-"]{font-size:2.5em;text-shadow: none;cursor:default}
@@ -619,7 +617,7 @@ colist td {
 }
 
 pre code a {
-    color: #ffffff;   /* your desired link color */
+    color: var(--link-color);   /* your desired link color */
     text-decoration: underline; /* optional */
 }
 
@@ -641,12 +639,12 @@ pre code a {
 }
 
 #content::-webkit-scrollbar-thumb {
-    background: #7f8c8d;
+    background: #d1d5db;
     border-radius: 5px;
 }
 
 #content::-webkit-scrollbar-thumb:hover {
-    background: #95a5a6;
+    background: #9ca3af;
 }
 
 /* Scrollbar with TOC theme style */
@@ -662,13 +660,13 @@ pre code a {
 }
 
 #toc:hover {
-    scrollbar-color: #7f8c8d #34495e;
+    scrollbar-color: #d1d5db #f3f4f6;
 }
 
 #toc:hover::-webkit-scrollbar-track {
-    background: #34495e;
+    background: #f3f4f6;
 }
 
 #toc:hover::-webkit-scrollbar-thumb {
-    background: #7f8c8d;
+    background: #d1d5db;
 }

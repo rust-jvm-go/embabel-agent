@@ -58,8 +58,8 @@
         width: 100%;
         height: var(--navbar-height);
         z-index: 40;
-        background-color: #000000;
-        border-bottom: 1px solid #334155;
+        background-color: #ffffff;
+        border-bottom: 1px solid #e5e7eb;
         padding-left: var(--toc-width);
         box-sizing: border-box;
     }
@@ -80,7 +80,7 @@
         font-size: 1.25rem;
         font-weight: 700;
         text-decoration: none;
-        color: #fafafa;
+        color: #1f2937;
     }
 
     .navbar-logo { width: 40px; margin-left: 16px; }
@@ -88,19 +88,20 @@
     .link-button {
         display: flex;
         align-items: center;
-        border: 1px solid #00000000;
+        border: 1px solid #d1d5db;
         border-radius: 6px;
         padding: 8px 12px;
         font-size: 0.875rem;
         font-weight: 700;
-        color: #27272a;
+        color: #374151;
         text-decoration: none;
-        background: #27272a;
-        transition: background-color 0.2s ease;
+        background: #ffffff;
+        transition: background-color 0.2s ease, border-color 0.2s ease;
     }
 
     .link-button:hover {
-        background-color: #37373a;
+        background-color: #f9fafb;
+        border-color: #9ca3af;
     }
 
     .github-icon {
@@ -112,14 +113,14 @@
     /* Put this AFTER the import of asciidoctor-default.css */
     .navbar a,
     .navbar a:visited {
-        color: #fff !important; /* white links */
+        color: #1f2937 !important; /* dark links */
         text-decoration: none; /* no underline */
     }
 
     .navbar a:hover,
     .navbar a:focus,
     .navbar a:active {
-        color: #fff !important; /* keep white on hover/focus/active */
+        color: #374151 !important; /* keep dark on hover/focus/active */
         text-decoration: none; /* keep underline off */
     }
 
@@ -129,5 +130,79 @@
     }
 
     /* or ensure the SVG uses fill="currentColor" */
+
+    /* Light theme overrides for entire document */
+    body {
+        background-color: #ffffff !important;
+        color: #1f2937 !important;
+    }
+    
+    #toc {
+        background-color: #ffffff !important;
+        color: #1f2937 !important;
+        border-right: 1px solid #e5e7eb !important;
+    }
+    
+    #toc.toc2 {
+        background-color: #ffffff !important;
+    }
+    
+    #toc a, #toc a:visited {
+        color: #374151 !important;
+    }
+    
+    #toc a:hover {
+        color: #1f2937 !important;
+    }
+    
+    #toctitle {
+        color: #1f2937 !important;
+        border-bottom: 1px solid #e5e7eb !important;
+    }
+    
+    .sect1, .sect2, .sect3, .sect4 {
+        color: #1f2937 !important;
+    }
+    
+    h1, h2, h3, h4, h5, h6 {
+        color: #1f2937 !important;
+    }
+    
+    .content {
+        background-color: #ffffff !important;
+        color: #1f2937 !important;
+    }
+    
+    pre, code {
+        background-color: #f9fafb !important;
+        color: #1f2937 !important;
+        border: 1px solid #e5e7eb !important;
+    }
+    
+    .listingblock {
+        background-color: #f9fafb !important;
+        border: 1px solid #e5e7eb !important;
+    }
+    
+    .admonitionblock {
+        background-color: #f9fafb !important;
+        border: 1px solid #e5e7eb !important;
+    }
+    
+    .tableblock {
+        background-color: #ffffff !important;
+        color: #1f2937 !important;
+        border: 1px solid #e5e7eb !important;
+    }
+    
+    .tableblock th {
+        background-color: #f3f4f6 !important;
+        color: #1f2937 !important;
+        border: 1px solid #e5e7eb !important;
+    }
+    
+    .tableblock td {
+        border: 1px solid #e5e7eb !important;
+    }
 
 </style>

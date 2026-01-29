@@ -13,23 +13,23 @@
 
 /* Base color variables */
 :root {
-    --bg-color: #1e1e1e;
-    --text-color: #e0e0e0;
-    --link-color: #4da6ff;
-    --link-hover-color: #80bfff;
-    --heading-color: #63c0f5;
-    --code-bg-color: #131313;
-    --code-text-color: #f8f8f2;
-    --quote-bg-color: #e0e0e0;
-    --quote-border-color: #444444;
-    --table-header-bg: #2d2d2d;
-    --table-border-color: #444444;
-    --table-alt-bg: #292929;
-    --admonition-note-bg: #e0e0e0;
-    --admonition-tip-bg: #e0e0e0;
-    --admonition-important-bg: #e0e0e0;
-    --admonition-warning-bg: #e0e0e0;
-    --admonition-caution-bg: #e0e0e0;
+    --bg-color: #ffffff;
+    --text-color: #1f2937;
+    --link-color: #2563eb;
+    --link-hover-color: #1d4ed8;
+    --heading-color: #111827;
+    --code-bg-color: #f9fafb;
+    --code-text-color: #1f2937;
+    --quote-bg-color: #f3f4f6;
+    --quote-border-color: #d1d5db;
+    --table-header-bg: #f9fafb;
+    --table-border-color: #e5e7eb;
+    --table-alt-bg: #f3f4f6;
+    --admonition-note-bg: #eff6ff;
+    --admonition-tip-bg: #f0fdf4;
+    --admonition-important-bg: #fefce8;
+    --admonition-warning-bg: #fffbeb;
+    --admonition-caution-bg: #fef2f2;
     --toc-min: 12rem; /* smallest TOC */
     --toc-ideal: 22vw; /* preferred responsive TOC */
     --toc-max: 20rem; /* largest TOC */
@@ -100,17 +100,10 @@ body {
     width: var(--toc-width); /* responsive */
     overflow: auto;
     z-index: 900;
-    background: linear-gradient(-45deg, #1a1f2e, #0d0d0d, #1f0d1f, #0d1f0d) !important;
-    background-size: 400% 400%;
-    animation: gradientBG 30s ease infinite;
+    background: #ffffff !important;
+    border-right: 1px solid #e5e7eb !important;
     padding: 1rem;
     box-sizing: border-box;
-}
-
-@keyframes gradientBG {
-    0% { background-position: 0% 50%; }
-    50% { background-position: 100% 50%; }
-    100% { background-position: 0% 50%; }
 }
 
 #content {
@@ -125,7 +118,7 @@ body {
     z-index: 950;
     overflow-y: auto;
     overflow-x: auto;
-    background: #000;
+    background: #ffffff;
     padding: 1.25rem 1.5rem 1.25rem 1.5rem;
     box-sizing: border-box;
     scrollbar-gutter: stable;
@@ -175,9 +168,9 @@ a:hover, a:focus {
     text-decoration: underline;
 }
 
-/* Document title and top-most header - make it white */
+/* Document title and top-most header - make it dark */
 h1, #header h1, #header > h1:first-child, #toctitle, .sidebarblock > .content > .title {
-    color: #ffffff !important;
+    color: var(--heading-color) !important;
     font-family: 'Inter', sans-serif !important;
     font-weight: 700;
     letter-spacing: -0.02em;
@@ -195,7 +188,7 @@ h2, h3, h4, h5, h6 {
 pre {
     background-color: var(--code-bg-color) !important;
     color: var(--code-text-color) !important;
-    border: 1px solid #444 !important;
+    border: 1px solid var(--table-border-color) !important;
     font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Consolas', monospace !important;
     font-weight: 400;
     font-size: 0.9em;
@@ -222,7 +215,7 @@ code {
 .literalblock .content pre {
     background-color: var(--code-bg-color) !important;
     color: var(--code-text-color) !important;
-    border: 1px solid #444 !important;
+    border: 1px solid var(--table-border-color) !important;
     padding: 1.2em !important;
     font-family: 'JetBrains Mono', 'Fira Code', 'Monaco', 'Consolas', monospace !important;
     font-weight: 400;
@@ -253,13 +246,13 @@ table {
     border-spacing: 0;
     border-radius: 8px;
     overflow: hidden;
-    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3);
-    color: #fafafa;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.1);
+    color: var(--text-color);
 }
 
 table.grid-all > * > tr > * {
     border-width: 1px;
-    color: #fafafa;
+    color: var(--text-color);
 }
 
 table thead, table tfoot {
@@ -278,7 +271,7 @@ table td, table th {
 table tr th, table tr td {
     padding: .5625em .625em;
     font-size: inherit;
-    color:#fafafa;
+    color: var(--text-color);
 }
 
 /* Blockquotes */
@@ -305,22 +298,17 @@ blockquote::before {
 
 /* Sidebars and panels */
 .sidebarblock {
-    background-color: #252525 !important;
-    border: 1px solid #444 !important;
+    background-color: var(--quote-bg-color) !important;
+    border: 1px solid var(--table-border-color) !important;
     border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 .exampleblock > .content {
-    background: linear-gradient(
-            135deg,
-            #252525 0%,
-            #2e2b38 40%,
-            #2b333d 100%
-    ) !important;
-    border: 1px solid #444 !important;
+    background: var(--quote-bg-color) !important;
+    border: 1px solid var(--table-border-color) !important;
     border-radius: 8px;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
 }
 
 /* Admonition blocks */
@@ -341,14 +329,9 @@ blockquote::before {
 .admonitionblock > table td.content {
     padding-left: 1.125em;
     padding-right: 1.25em;
-    border-left: 1px solid #444;
-    color: #e0e0e0 !important;
-    background: linear-gradient(
-            135deg,
-            #252525 0%,
-            #2e2b38 40%,
-            #2b333d 100%
-    ) !important;
+    border-left: 1px solid var(--table-border-color);
+    color: var(--text-color) !important;
+    background: var(--quote-bg-color) !important;
 }
 
 .admonitionblock.note > table td.icon {
@@ -373,16 +356,11 @@ blockquote::before {
 
 /* TOC - standard and left panel */
 #toc, #toc.toc, #content #toc, #toc.toc2, #header .details, .sidebarblock, .listingblock, .literalblock, .imageblock {
-    background-color: #252525 !important;
+    background-color: var(--quote-bg-color) !important;
 }
 
 .tableblock {
-    background: linear-gradient(
-            135deg,
-            #2a2a2a 0%,
-            #2f2c3a 40%,
-            #2c333a 100%
-    ) !important;
+    background: var(--quote-bg-color) !important;
 }
 
 #toc a, #toc.toc a, #content #toc a, #toc.toc2 a {
@@ -397,8 +375,8 @@ blockquote::before {
 
 /* Left sidebar TOC */
 .toc2 {
-    background-color: #1a1a1a !important;
-    border-right: 1px solid #444 !important;
+    background-color: var(--quote-bg-color) !important;
+    border-right: 1px solid var(--table-border-color) !important;
     color: var(--text-color) !important;
     backdrop-filter: blur(10px);
 }
@@ -430,12 +408,12 @@ body.toc2 {
 
 /* Footer */
 #footer, #footer-text {
-    color: #888 !important;
+    color: #6b7280 !important;
 }
 
 /* Horizontal rule */
 hr {
-    border-top: 1px solid #444 !important;
+    border-top: 1px solid var(--table-border-color) !important;
 }
 
 /* Mark the floating header anchors */
@@ -445,18 +423,18 @@ hr {
 
 /* Footnotes */
 .footnote, .footnotes ol li {
-    color: #bbb !important;
+    color: #6b7280 !important;
 }
 
 /* Keyboard/button shortcuts */
 .keyseq {
-    color: #ddd !important;
+    color: #374151 !important;
 }
 
 kbd {
-    background-color: #333 !important;
-    border: 1px solid #555 !important;
-    color: #ddd !important;
+    background-color: #f3f4f6 !important;
+    border: 1px solid #d1d5db !important;
+    color: #374151 !important;
 }
 
 /* Image borders */
@@ -478,18 +456,18 @@ kbd {
 
 /* Custom Site Palette Overrides */
 :root {
-    --bg-color: #000000; /* page background */
-    --text-color: #f4f4f4; /* main text (light neutral) */
-    --code-bg: #161413; /* code block background */
-    --code-border: #2a2a2a; /* subtle border for code */
+    --bg-color: #ffffff; /* page background */
+    --text-color: #1f2937; /* main text (dark neutral) */
+    --code-bg: #f9fafb; /* code block background */
+    --code-border: #e5e7eb; /* subtle border for code */
 
     /* brand code token colors */
-    --code-color1: #9f77cd; /* purple */
-    --code-color2: #3fd73c; /* green */
-    --code-color3: #596f8c; /* blue-gray */
-    --code-color4: #e9b306; /* amber/yellow */
-    --code-color5: #ef4444; /* red */
-    --code-fg: #f8f8f2; /* fallback default */
+    --code-color1: #dc2626; /* red */
+    --code-color2: #059669; /* green */
+    --code-color3: #2563eb; /* blue */
+    --code-color4: #7c3aed; /* purple */
+    --code-color5: #ea580c; /* orange */
+    --code-fg: #1f2937; /* fallback default */
 }
 
 /* === TOC Tweaks === */
@@ -501,28 +479,28 @@ kbd {
 
 /* Base TOC styling */
 #toc {
-    border-right: 1px solid #444;
+    border-right: 1px solid var(--table-border-color);
     padding: 1rem;
-    background-color: #161413; /* match your code bg or page bg */
+    background-color: var(--quote-bg-color); /* match light theme */
 }
 
 #toc a {
     display: block;
     padding: 0.4rem 0.6rem;
     border-radius: 4px;
-    color: #9f77cd !important; /* purple for links */
+    color: var(--link-color) !important; /* standard link color */
     text-decoration: none;
     transition: background-color 0.2s ease, color 0.2s ease;
 }
 
 #toc a:hover {
-    background-color: #2a2a2a;
-    color: #e9b306 !important; /* amber on hover */
+    background-color: var(--table-alt-bg);
+    color: var(--link-hover-color) !important;
 }
 
 /* Highlight the active section */
 #toc li.active > a {
-    background-color: #9f77cd !important; /* purple background */
-    color: #161413 !important; /* dark text for contrast */
+    background-color: var(--link-color) !important; /* blue background */
+    color: #ffffff !important; /* white text for contrast */
     font-weight: 600;
 }
