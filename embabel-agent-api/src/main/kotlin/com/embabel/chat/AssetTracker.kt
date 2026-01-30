@@ -17,6 +17,8 @@ package com.embabel.chat
 
 import com.embabel.agent.api.tool.Tool
 import com.embabel.chat.support.AssetAddingTool
+import com.embabel.chat.support.InMemoryAssetTracker
+import java.util.function.Predicate
 
 /**
  * Extended by anything that can track assets
@@ -42,9 +44,45 @@ interface AssetTracker : AssetView {
     }
 
     /**
+     * Wrap a tool so any outputs are tracked as assets, with a filter (Java-friendly).
+     * Only assets that pass the filter will be tracked.
+     * @param tool The tool to wrap
+     * @param filter Predicate - only assets passing this filter are tracked
+     */
+    fun addReturnedAssets(tool: Tool, filter: Predicate<Asset>): Tool {
+        return AssetAddingTool(
+            delegate = tool,
+            assetTracker = this,
+            converter = { it },
+            clazz = Asset::class.java,
+            artifactFilter = { filter.test(it) }
+        )
+    }
+
+    /**
      * Make these tools track any assets produced.
      */
     fun addAnyReturnedAssets(tools: List<Tool>): List<Tool> {
         return tools.map { addReturnedAssets(it) }
+    }
+
+    /**
+     * Make these tools track any assets produced, with a filter.
+     * Only assets that pass the filter will be tracked.
+     * @param tools The tools to wrap
+     * @param filter Predicate - only assets passing this filter are tracked
+     */
+    fun addAnyReturnedAssets(tools: List<Tool>, filter: Predicate<Asset>): List<Tool> {
+        return tools.map { addReturnedAssets(it, filter) }
+    }
+
+    companion object {
+
+        /**
+         * Create an in-memory asset tracker that conveniently chains
+         * with the withAsset fluent API
+         */
+        @JvmStatic
+        fun inMemory(): InMemoryAssetTracker = InMemoryAssetTracker()
     }
 }
