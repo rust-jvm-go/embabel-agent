@@ -4,12 +4,12 @@
     <parent>
         <groupId>com.embabel.build</groupId>
         <artifactId>embabel-dependencies-parent</artifactId>
-        <version>0.1.10</version>
+        <version>0.1.12-SNAPSHOT</version>
         <relativePath />
     </parent>
     <groupId>com.embabel.agent</groupId>
     <artifactId>embabel-agent-dependencies</artifactId>
-    <version>0.3.4-SNAPSHOT</version>
+    <version>0.3.5-SNAPSHOT</version>
     <packaging>pom</packaging>
     <name>Embabel Agent BOM</name>
     <description>Embabel Agent BOM</description>
@@ -44,7 +44,13 @@
 
             <dependency>
                 <groupId>com.embabel.agent</groupId>
-                <artifactId>embabel-agent-common</artifactId>
+                <artifactId>embabel-agent-ai</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-webmvc</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -75,6 +81,12 @@
             <dependency>
                 <groupId>com.embabel.agent</groupId>
                 <artifactId>embabel-agent-shell-autoconfigure</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-observability-autoconfigure</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -159,6 +171,12 @@
             <dependency>
                 <groupId>com.embabel.agent</groupId>
                 <artifactId>embabel-agent-mcpserver</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-observability</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -266,6 +284,12 @@
 
             <dependency>
                 <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-starter-observability</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
                 <artifactId>embabel-agent-starter-mcpserver</artifactId>
                 <version>${project.version}</version>
             </dependency>
@@ -279,6 +303,12 @@
             <dependency>
                 <groupId>com.embabel.agent</groupId>
                 <artifactId>embabel-agent-starter-a2a</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+
+            <dependency>
+                <groupId>com.embabel.agent</groupId>
+                <artifactId>embabel-agent-starter-webmvc</artifactId>
                 <version>${project.version}</version>
             </dependency>
 
@@ -298,6 +328,13 @@
                 <groupId>com.embabel.agent</groupId>
                 <artifactId>embabel-agent-test-common</artifactId>
                 <version>${project.version}</version>
+            </dependency>
+
+            <!-- OpenTelemetry Semantic Conventions (separate group from opentelemetry-bom) -->
+            <dependency>
+                <groupId>io.opentelemetry.semconv</groupId>
+                <artifactId>opentelemetry-semconv</artifactId>
+                <version>1.29.0-alpha</version>
             </dependency>
         </dependencies>
     </dependencyManagement>

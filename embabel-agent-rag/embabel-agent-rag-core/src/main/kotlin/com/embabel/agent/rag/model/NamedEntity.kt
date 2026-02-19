@@ -15,8 +15,13 @@
  */
 package com.embabel.agent.rag.model
 
+import com.embabel.agent.core.DataDictionary
+import com.embabel.agent.core.JvmType
 import com.embabel.common.core.types.NamedAndDescribed
 import com.embabel.common.util.indent
+import org.slf4j.LoggerFactory
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver
+import org.springframework.core.type.classreading.CachingMetadataReaderFactory
 
 /**
  * Base contract for any named entity that can be stored and retrieved.
@@ -25,7 +30,7 @@ import com.embabel.common.util.indent
  * but a superinterface for domain classes with strongly typed properties.
  *
  * Domain classes implement this interface to enable:
- * - Storage in [NamedEntityDataRepository]
+ * - Storage in [com.embabel.agent.rag.service.NamedEntityDataRepository]
  * - Hydration from [NamedEntityData]
  * - Vector and text search via [Retrievable]
  *
@@ -68,4 +73,48 @@ interface NamedEntity : Retrievable, NamedAndDescribed {
 
     override fun infoString(verbose: Boolean?, indent: Int): String =
         "(${labels().joinToString(":")} id='$id', name=$name)".indent(indent)
+
+    companion object {
+
+        private val logger = LoggerFactory.getLogger(NamedEntity::class.java)
+
+        /**
+         * Create a [DataDictionary] by scanning the given packages for all
+         * [NamedEntity] types, including interfaces and abstract classes.
+         */
+        @JvmStatic
+        fun dataDictionaryFromPackages(vararg packages: String): DataDictionary {
+            val nonBlank = packages.filter { it.isNotBlank() }
+            if (nonBlank.isEmpty()) {
+                return DataDictionary.fromDomainTypes("NamedEntity", emptySet())
+            }
+            val resolver = PathMatchingResourcePatternResolver()
+            val metadataReaderFactory = CachingMetadataReaderFactory(resolver)
+            val types = mutableSetOf<JvmType>()
+            for (packageName in nonBlank) {
+                val pattern = "classpath*:${packageName.replace('.', '/')}/**/*.class"
+                try {
+                    for (resource in resolver.getResources(pattern)) {
+                        try {
+                            val reader = metadataReaderFactory.getMetadataReader(resource)
+                            val clazz = Class.forName(reader.classMetadata.className)
+                            if (NamedEntity::class.java.isAssignableFrom(clazz) &&
+                                clazz != NamedEntity::class.java &&
+                                clazz != NamedEntityData::class.java
+                            ) {
+                                types.add(JvmType(clazz))
+                            }
+                        } catch (_: ClassNotFoundException) {
+                        } catch (_: NoClassDefFoundError) {
+                        }
+                    }
+                } catch (_: Exception) {
+                }
+            }
+            logger.info(
+                "dataDictionaryFromPackages({}) found {} NamedEntity types: {}",
+                packages.toList(), types.size, types.map { it.clazz.name })
+            return DataDictionary.fromDomainTypes("NamedEntity", types)
+        }
+    }
 }

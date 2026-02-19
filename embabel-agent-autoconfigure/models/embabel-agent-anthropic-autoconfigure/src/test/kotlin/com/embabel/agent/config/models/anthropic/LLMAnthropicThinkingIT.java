@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Embabel Software, Inc.
+ * Copyright 2024-2026 Embabel Pty Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -16,7 +16,6 @@
 package com.embabel.agent.config.models.anthropic;
 
 import com.embabel.agent.api.common.Ai;
-import com.embabel.agent.api.common.MultimodalContent;
 import com.embabel.agent.api.common.PromptRunner;
 import com.embabel.agent.api.common.autonomy.Autonomy;
 import com.embabel.agent.api.validation.guardrails.AssistantMessageGuardRail;
@@ -25,8 +24,6 @@ import com.embabel.agent.api.validation.guardrails.UserInputGuardRail;
 import com.embabel.agent.autoconfigure.models.anthropic.AgentAnthropicAutoConfiguration;
 import com.embabel.agent.core.Blackboard;
 import com.embabel.agent.spi.LlmService;
-import com.embabel.chat.AssistantMessage;
-import com.embabel.chat.UserMessage;
 import com.embabel.common.core.thinking.ThinkingBlock;
 import com.embabel.common.core.thinking.ThinkingResponse;
 import com.embabel.common.core.validation.ValidationError;
@@ -272,10 +269,6 @@ class LLMAnthropicThinkingIT {
             return new ValidationResult(true, Collections.emptyList());
         }
 
-        @Override
-        public @NotNull ValidationResult validate(@NotNull AssistantMessage message, @NotNull Blackboard blackboard) {
-            return AssistantMessageGuardRail.super.validate(message, blackboard);
-        }
     }
 
     /**
@@ -327,7 +320,7 @@ class LLMAnthropicThinkingIT {
 
         // When: create object with thinking
         ThinkingResponse<MonthItem> response = runner
-                .withThinking()
+                .thinking()
                 .createObject(prompt, MonthItem.class);
 
         // Then: Verify both result and thinking content
@@ -361,7 +354,7 @@ class LLMAnthropicThinkingIT {
 
 
         ThinkingResponse<MonthItem> response = runner
-                .withThinking()
+                .thinking()
                 .createObjectIfPossible(prompt, MonthItem.class);
 
         // Then: Verify response and thinking content (result may be null if creation not possible)
@@ -405,7 +398,7 @@ class LLMAnthropicThinkingIT {
         try {
             // When: create object with thinking
             response = runner
-                    .withThinking()
+                    .thinking()
                     .createObject(prompt, MonthItem.class);
         } catch (Exception ex) {
             assertInstanceOf(GuardRailViolationException.class, ex, "expected guard rail exception");
@@ -432,7 +425,7 @@ class LLMAnthropicThinkingIT {
 
 
         ThinkingResponse<MonthItem> response = runner
-                .withThinking()
+                .thinking()
                 .createObjectIfPossible(prompt, MonthItem.class);
 
 
@@ -484,7 +477,7 @@ class LLMAnthropicThinkingIT {
 
 
         ThinkingResponse<MonthItem> response = runner
-                .withThinking()
+                .thinking()
                 .createObject(prompt, MonthItem.class);
 
         // Then: Verify extraction of multiple thinking formats

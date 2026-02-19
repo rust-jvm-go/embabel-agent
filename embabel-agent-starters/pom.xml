@@ -4,7 +4,7 @@
     <parent>
         <groupId>com.embabel.agent</groupId>
         <artifactId>embabel-agent-parent</artifactId>
-        <version>0.3.4-SNAPSHOT</version>
+        <version>0.3.5-SNAPSHOT</version>
     </parent>
     <artifactId>embabel-agent-starters</artifactId>
     <packaging>pom</packaging>
@@ -23,6 +23,7 @@
         <module>embabel-agent-starter</module>
         <module>embabel-agent-starter-platform</module>
         <module>embabel-agent-starter-shell</module>
+        <module>embabel-agent-starter-observability</module>
         <module>embabel-agent-starter-mcpserver</module>
         <module>embabel-agent-starter-bedrock</module>
         <module>embabel-agent-starter-openai</module>
@@ -36,6 +37,7 @@
         <module>embabel-agent-starter-google-genai</module>
         <module>embabel-agent-starter-mistral-ai</module>
         <module>embabel-agent-starter-a2a</module>
+        <module>embabel-agent-starter-webmvc</module>
     </modules>
 
 </project>

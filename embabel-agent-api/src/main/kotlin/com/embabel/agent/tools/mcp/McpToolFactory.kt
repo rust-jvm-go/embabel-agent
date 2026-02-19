@@ -15,24 +15,21 @@
  */
 package com.embabel.agent.tools.mcp
 
-import com.embabel.agent.api.tool.MatryoshkaTool
 import com.embabel.agent.api.tool.Tool
-import com.embabel.agent.spi.support.springai.toEmbabelTool
-import com.embabel.common.util.loggerFor
-import io.modelcontextprotocol.client.McpSyncClient
-import org.springframework.ai.mcp.SyncMcpToolCallbackProvider
+import com.embabel.agent.api.tool.progressive.UnfoldingTool
 import org.springframework.ai.tool.ToolCallback
 
 /**
- * Factory for creating Tools and MatryoshkaTools backed by MCP.
+ * Factory for creating Tools and UnfoldingTools backed by MCP
+ * in a consistent way, across MCP providers.
  *
  * Provides methods to:
  * - Get a single MCP tool by name ([toolByName], [requiredToolByName])
- * - Create MatryoshkaTools that act as facades for groups of MCP tools
+ * - Create UnfoldingTools that act as facades for groups of MCP tools
  *
  * Example usage:
  * ```kotlin
- * val factory = McpToolFactory(mcpSyncClients)
+ * val factory: McpToolFactory = SpringAiMcpToolFactory(mcpSyncClients)
  *
  * // Single tool by name (returns null if not found)
  * val searchTool = factory.toolByName("brave_search")
@@ -40,79 +37,69 @@ import org.springframework.ai.tool.ToolCallback
  * // Single tool by name (throws if not found)
  * val requiredTool = factory.requiredToolByName("brave_search")
  *
- * // MatryoshkaTool with exact tool name whitelist
- * val githubTool = factory.matryoshkaByName(
+ * // UnfoldingTool with exact tool name whitelist
+ * val githubTool = factory.unfoldingByName(
  *     name = "github_operations",
  *     description = "GitHub operations. Invoke to access GitHub tools.",
  *     toolNames = setOf("create_issue", "list_issues", "get_pull_request")
  * )
  *
- * // MatryoshkaTool with regex pattern matching
- * val dbTool = factory.matryoshkaMatching(
+ * // UnfoldingTool with regex pattern matching
+ * val dbTool = factory.unfoldingMatching(
  *     name = "database_operations",
  *     description = "Database operations. Invoke to access database tools.",
  *     patterns = listOf("^db_".toRegex(), "query.*".toRegex())
  * )
  *
- * // MatryoshkaTool with custom filter predicate
- * val webTool = factory.matryoshka(
+ * // UnfoldingTool with custom filter predicate
+ * val webTool = factory.unfolding(
  *     name = "web_operations",
  *     description = "Web operations. Invoke to access web tools.",
  *     filter = { it.toolDefinition.name().startsWith("web_") }
  * )
  * ```
+ * See [com.embabel.agent.spi.support.springai.SpringAiMcpToolFactory] for a Spring-based implementation that creates tools from MCP clients.
  */
-class McpToolFactory(
-    private val clients: List<McpSyncClient>,
-) {
-
-    private val logger = loggerFor<McpToolFactory>()
+interface McpToolFactory {
 
     /**
-     * Create a MatryoshkaTool from MCP clients with a filter predicate.
+     * Create an UnfoldingTool from MCP clients with a filter predicate.
      *
-     * @param name Name of the MatryoshkaTool facade
+     * @param name Name of the UnfoldingTool facade
      * @param description Description explaining when to use this tool category
      * @param filter Predicate that returns true to include a tool
-     * @param removeOnInvoke Whether to remove the facade after invocation (default true)
+     * @param removeOnInvoke Whether to remove the facade after invocation
      */
-    @JvmOverloads
-    fun matryoshka(
+    fun unfolding(
         name: String,
         description: String,
         filter: (ToolCallback) -> Boolean,
-        removeOnInvoke: Boolean = true,
-    ): MatryoshkaTool {
-        val innerTools = loadTools(clients, filter)
-        logger.debug(
-            "Created McpMatryoshkaTool '{}' with {} inner tools: {}",
-            name,
-            innerTools.size,
-            innerTools.map { it.definition.name }
-        )
-        return MatryoshkaTool.of(
-            name = name,
-            description = description,
-            innerTools = innerTools,
-            removeOnInvoke = removeOnInvoke,
-        )
-    }
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool
 
     /**
-     * Create a MatryoshkaTool from MCP clients filtering by tool name regex patterns.
+     * Create an UnfoldingTool from MCP clients with a filter predicate, with removeOnInvoke=true.
+     */
+    fun unfolding(
+        name: String,
+        description: String,
+        filter: (ToolCallback) -> Boolean,
+    ): UnfoldingTool = unfolding(name, description, filter, true)
+
+    /**
+     * Create an UnfoldingTool from MCP clients filtering by tool name regex patterns.
      *
-     * @param name Name of the MatryoshkaTool facade
+     * @param name Name of the UnfoldingTool facade
      * @param description Description explaining when to use this tool category
      * @param patterns Regex patterns to match against tool names
-     * @param removeOnInvoke Whether to remove the facade after invocation (default true)
+     * @param removeOnInvoke Whether to remove the facade after invocation
      */
-    @JvmOverloads
-    fun matryoshkaMatching(
+    fun unfoldingMatching(
         name: String,
         description: String,
         patterns: List<Regex>,
-        removeOnInvoke: Boolean = true,
-    ): MatryoshkaTool = matryoshka(
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool = unfolding(
         name = name,
         description = description,
         filter = { callback ->
@@ -123,20 +110,28 @@ class McpToolFactory(
     )
 
     /**
-     * Create a MatryoshkaTool from MCP clients with an exact tool name whitelist.
+     * Create an UnfoldingTool from MCP clients filtering by tool name regex patterns, with removeOnInvoke=true.
+     */
+    fun unfoldingMatching(
+        name: String,
+        description: String,
+        patterns: List<Regex>,
+    ): UnfoldingTool = unfoldingMatching(name, description, patterns, true)
+
+    /**
+     * Create an UnfoldingTool from MCP clients with an exact tool name whitelist.
      *
-     * @param name Name of the MatryoshkaTool facade
+     * @param name Name of the UnfoldingTool facade
      * @param description Description explaining when to use this tool category
      * @param toolNames Exact tool names to include
-     * @param removeOnInvoke Whether to remove the facade after invocation (default true)
+     * @param removeOnInvoke Whether to remove the facade after invocation
      */
-    @JvmOverloads
-    fun matryoshkaByName(
+    fun unfoldingByName(
         name: String,
         description: String,
         toolNames: Set<String>,
-        removeOnInvoke: Boolean = true,
-    ): MatryoshkaTool = matryoshka(
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool = unfolding(
         name = name,
         description = description,
         filter = { callback -> callback.toolDefinition.name() in toolNames },
@@ -144,21 +139,21 @@ class McpToolFactory(
     )
 
     /**
+     * Create an UnfoldingTool from MCP clients with an exact tool name whitelist, with removeOnInvoke=true.
+     */
+    fun unfoldingByName(
+        name: String,
+        description: String,
+        toolNames: Set<String>,
+    ): UnfoldingTool = unfoldingByName(name, description, toolNames, true)
+
+    /**
      * Get a single MCP tool by exact name.
      *
      * @param toolName The exact name of the MCP tool
      * @return The tool, or null if not found
      */
-    fun toolByName(toolName: String): Tool? {
-        val tools = loadTools(clients) { callback ->
-            callback.toolDefinition.name() == toolName
-        }
-        return tools.firstOrNull().also {
-            if (it == null) {
-                logger.warn("MCP tool '{}' not found", toolName)
-            }
-        }
-    }
+    fun toolByName(toolName: String): Tool?
 
     /**
      * Get a single MCP tool by exact name, throwing if not found.
@@ -167,34 +162,74 @@ class McpToolFactory(
      * @return The tool
      * @throws IllegalArgumentException if the tool is not found
      */
-    fun requiredToolByName(toolName: String): Tool {
-        return toolByName(toolName)
-            ?: throw IllegalArgumentException(
-                buildString {
-                    append("MCP tool '$toolName' not found.")
-                    val availableTools = loadTools(clients) { true }
-                    if (availableTools.isEmpty()) {
-                        append(" No MCP tools are available - check MCP client connections.")
-                    } else {
-                        append(" Available tools: ${availableTools.map { it.definition.name }.sorted().joinToString(", ")}")
-                    }
-                }
-            )
-    }
+    fun requiredToolByName(toolName: String): Tool =
+        toolByName(toolName)
+            ?: throw IllegalArgumentException("MCP tool '$toolName' not found")
 
-    private fun loadTools(
-        clients: List<McpSyncClient>,
+    // region Deprecated methods
+
+    @Deprecated(
+        message = "Use unfolding() instead",
+        replaceWith = ReplaceWith("unfolding(name, description, filter, removeOnInvoke)")
+    )
+    fun matryoshka(
+        name: String,
+        description: String,
         filter: (ToolCallback) -> Boolean,
-    ): List<Tool> {
-        return try {
-            val provider = SyncMcpToolCallbackProvider(clients)
-            val filteredCallbacks = provider.toolCallbacks.filter(filter)
-            val nativeTools = filteredCallbacks.map { it.toEmbabelTool() }
-            logger.debug("Loaded {} MCP tools", nativeTools.size)
-            nativeTools
-        } catch (e: Exception) {
-            logger.error("Failed to load MCP tools: {}", e.message)
-            emptyList()
-        }
-    }
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool = unfolding(name, description, filter, removeOnInvoke)
+
+    @Deprecated(
+        message = "Use unfolding() instead",
+        replaceWith = ReplaceWith("unfolding(name, description, filter)")
+    )
+    fun matryoshka(
+        name: String,
+        description: String,
+        filter: (ToolCallback) -> Boolean,
+    ): UnfoldingTool = unfolding(name, description, filter)
+
+    @Deprecated(
+        message = "Use unfoldingMatching() instead",
+        replaceWith = ReplaceWith("unfoldingMatching(name, description, patterns, removeOnInvoke)")
+    )
+    fun matryoshkaMatching(
+        name: String,
+        description: String,
+        patterns: List<Regex>,
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool = unfoldingMatching(name, description, patterns, removeOnInvoke)
+
+    @Deprecated(
+        message = "Use unfoldingMatching() instead",
+        replaceWith = ReplaceWith("unfoldingMatching(name, description, patterns)")
+    )
+    fun matryoshkaMatching(
+        name: String,
+        description: String,
+        patterns: List<Regex>,
+    ): UnfoldingTool = unfoldingMatching(name, description, patterns)
+
+    @Deprecated(
+        message = "Use unfoldingByName() instead",
+        replaceWith = ReplaceWith("unfoldingByName(name, description, toolNames, removeOnInvoke)")
+    )
+    fun matryoshkaByName(
+        name: String,
+        description: String,
+        toolNames: Set<String>,
+        removeOnInvoke: Boolean,
+    ): UnfoldingTool = unfoldingByName(name, description, toolNames, removeOnInvoke)
+
+    @Deprecated(
+        message = "Use unfoldingByName() instead",
+        replaceWith = ReplaceWith("unfoldingByName(name, description, toolNames)")
+    )
+    fun matryoshkaByName(
+        name: String,
+        description: String,
+        toolNames: Set<String>,
+    ): UnfoldingTool = unfoldingByName(name, description, toolNames)
+
+    // endregion
 }

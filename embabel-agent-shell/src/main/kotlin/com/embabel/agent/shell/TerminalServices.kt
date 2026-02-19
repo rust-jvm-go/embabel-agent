@@ -29,6 +29,7 @@ import com.embabel.agent.spi.logging.ColorPalette
 import com.embabel.agent.spi.logging.DefaultColorPalette
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.ChatSession
+import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
 import com.embabel.common.util.AnsiColor
 import com.embabel.common.util.color
@@ -245,7 +246,7 @@ class TerminalServices(
             when (event) {
                 is MessageOutputChannelEvent -> {
                     val formattedResponse = WordUtils.wrap(
-                        "${event.message.sender}: ${event.message.content.color(colorPalette.color2)}",
+                        "${event.message.role.displayName}: ${event.message.content.color(colorPalette.color2)}",
                         shellProperties.lineLength,
                     )
                     println(formattedResponse)

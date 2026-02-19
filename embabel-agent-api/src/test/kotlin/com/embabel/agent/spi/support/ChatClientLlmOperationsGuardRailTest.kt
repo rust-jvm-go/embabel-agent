@@ -17,19 +17,17 @@ package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.annotation.support.Wumpus
 import com.embabel.agent.api.common.InteractionId
-import com.embabel.agent.api.common.ToolObject
 import com.embabel.agent.api.common.ToolsStats
 import com.embabel.agent.api.event.LlmRequestEvent
+import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.validation.guardrails.AssistantMessageGuardRail
-import com.embabel.agent.api.validation.guardrails.GuardRailConfiguration
 import com.embabel.agent.api.validation.guardrails.GuardRailViolationException
 import com.embabel.agent.api.validation.guardrails.UserInputGuardRail
 import com.embabel.agent.core.*
+import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetToolsFrom
-import com.embabel.agent.spi.LlmOperations
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
-import com.embabel.agent.spi.support.springai.DefaultToolDecorator
 import com.embabel.agent.spi.support.springai.MaybeReturn
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator

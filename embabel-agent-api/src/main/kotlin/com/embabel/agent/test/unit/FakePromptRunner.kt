@@ -16,18 +16,20 @@
 package com.embabel.agent.test.unit
 
 import com.embabel.agent.api.common.*
-import com.embabel.agent.api.validation.guardrails.GuardRail
-import com.embabel.agent.api.common.nested.ObjectCreator
-import com.embabel.agent.api.common.nested.TemplateOperations
 import com.embabel.agent.api.common.support.DelegatingCreating
 import com.embabel.agent.api.common.support.DelegatingRendering
 import com.embabel.agent.api.common.support.PromptExecutionDelegate
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolObject
+import com.embabel.agent.api.tool.agentic.DomainToolPredicate
+import com.embabel.agent.api.tool.agentic.DomainToolSource
+import com.embabel.agent.api.validation.guardrails.GuardRail
+import com.embabel.agent.spi.loop.ToolInjectionStrategy
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
+import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetTools
-import com.embabel.agent.spi.LlmOperations
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
@@ -60,7 +62,7 @@ data class LlmInvocation(
      * The default toString() of Message objects truncates content for readability.
      */
     val prompt: String
-        get() = messages.joinToString("\n") { it.textContent }
+        get() = messages.joinToString("\n") { it.content }
 
     override fun toString(): String {
         return "LlmInvocation(id=${interaction.id}, method=$method, messageCount=${messages.size})"
@@ -171,14 +173,6 @@ data class FakePromptRunner(
             return this@FakePromptRunner.copy(otherTools = this@FakePromptRunner.otherTools + tool).DelegateAdapter()
         }
 
-        override fun withHandoffs(vararg outputTypes: Class<*>): PromptExecutionDelegate {
-            TODO("Implement handoff support")
-        }
-
-        override fun withSubagents(vararg subagents: Subagent): PromptExecutionDelegate {
-            TODO("Implement subagent handoff support")
-        }
-
         override fun withPromptContributors(promptContributors: List<PromptContributor>): PromptExecutionDelegate {
             return this@FakePromptRunner.copy(
                 promptContributors = this@FakePromptRunner.promptContributors + promptContributors
@@ -209,6 +203,24 @@ data class FakePromptRunner(
         override fun withGuardRails(vararg guards: GuardRail): PromptExecutionDelegate {
             return this@FakePromptRunner.copy(guardRails = this@FakePromptRunner.guardRails + guards).DelegateAdapter()
         }
+
+        override val domainToolSources: List<DomainToolSource<*>>
+            get() = emptyList()
+
+        override val autoDiscovery: Boolean
+            get() = false
+
+        override val injectionStrategies: List<ToolInjectionStrategy>
+            get() = emptyList()
+
+        override fun withInjectionStrategies(strategies: List<ToolInjectionStrategy>): PromptExecutionDelegate = this
+
+        override fun <T : Any> withToolChainingFrom(
+            type: Class<T>,
+            predicate: DomainToolPredicate<T>,
+        ): PromptExecutionDelegate = this
+
+        override fun withToolChainingFromAny(): PromptExecutionDelegate = this
 
         override fun <T> createObject(messages: List<Message>, outputClass: Class<T>): T {
             return this@FakePromptRunner.createObject(messages, outputClass)
@@ -333,7 +345,12 @@ data class FakePromptRunner(
         messages: List<Message>,
         outputClass: Class<T>,
     ): T {
-        return createObject(prompt = messages.joinToString(), outputClass = outputClass)
+        _llmInvocations += LlmInvocation(
+            interaction = createLlmInteraction(),
+            messages = messages,
+            method = Method.CREATE_OBJECT,
+        )
+        return getResponse(outputClass)!!
     }
 
     override fun evaluateCondition(
@@ -398,14 +415,6 @@ data class FakePromptRunner(
         )
     }
 
-    override fun withHandoffs(vararg outputTypes: Class<*>): PromptRunner {
-        TODO("Implement handoff support")
-    }
-
-    override fun withSubagents(vararg subagents: Subagent): PromptRunner {
-        TODO("Implement subagent handoff support")
-    }
-
     override fun withToolGroup(toolGroup: ToolGroup): PromptRunner =
         copy(otherTools = this.otherTools + toolGroup.tools)
 
@@ -422,4 +431,11 @@ data class FakePromptRunner(
     override fun withGuardRails(vararg guards: GuardRail): PromptRunner {
         return copy(guardRails = this.guardRails + guards)
     }
+
+    override fun <T : Any> withToolChainingFrom(
+        type: Class<T>,
+        predicate: DomainToolPredicate<T>,
+    ): PromptRunner = this
+
+    override fun withToolChainingFromAny(): PromptRunner = this
 }

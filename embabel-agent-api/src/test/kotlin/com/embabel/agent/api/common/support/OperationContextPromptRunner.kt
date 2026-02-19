@@ -15,7 +15,12 @@
  */
 package com.embabel.agent.api.common.support
 
-import com.embabel.agent.api.common.*
+import com.embabel.agent.api.common.ActionContext
+import com.embabel.agent.api.common.AgentImage
+import com.embabel.agent.api.common.ContextualPromptElement
+import com.embabel.agent.api.common.InteractionId
+import com.embabel.agent.api.common.OperationContext
+import com.embabel.agent.api.common.PromptRunner
 import com.embabel.agent.api.common.nested.support.PromptRunnerCreating
 import com.embabel.agent.api.common.nested.support.PromptRunnerRendering
 import com.embabel.agent.api.common.streaming.StreamingPromptRunner
@@ -23,19 +28,16 @@ import com.embabel.agent.api.common.support.streaming.StreamingCapabilityDetecto
 import com.embabel.agent.api.common.support.streaming.StreamingImpl
 import com.embabel.agent.api.common.thinking.support.ThinkingPromptRunnerOperationsImpl
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolObject
+import com.embabel.agent.api.tool.agentic.DomainToolPredicate
 import com.embabel.agent.api.validation.guardrails.GuardRail
-import com.embabel.agent.core.ProcessOptions
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
-import com.embabel.agent.core.Verbosity
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetTools
 import com.embabel.agent.experimental.primitive.Determination
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.agent.spi.support.springai.streaming.StreamingChatClientOperations
-import com.embabel.agent.tools.agent.AgentTool
-import com.embabel.agent.tools.agent.Handoffs
-import com.embabel.agent.tools.agent.PromptedTextCommunicator
 import com.embabel.chat.ImagePart
 import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
@@ -235,47 +237,6 @@ internal data class OperationContextPromptRunner(
     override fun withTool(tool: Tool): PromptRunner =
         copy(otherTools = this.otherTools + tool)
 
-    override fun withHandoffs(vararg outputTypes: Class<*>): PromptRunner {
-        val handoffs = Handoffs(
-            autonomy = context.agentPlatform().platformServices.autonomy(),
-            outputTypes = outputTypes.toList(),
-            applicationName = context.agentPlatform().name,
-        )
-        return copy(
-            otherTools = this.otherTools + handoffs.tools,
-        )
-    }
-
-    override fun withSubagents(
-        vararg subagents: Subagent,
-    ): PromptRunner {
-        val newTools = subagents.map { subagent ->
-            val agent = subagent.resolve(context.agentPlatform())
-            AgentTool(
-                autonomy = context.agentPlatform().platformServices.autonomy(),
-                agent = agent,
-                textCommunicator = PromptedTextCommunicator,
-                objectMapper = context.agentPlatform().platformServices.objectMapper,
-                inputType = subagent.inputClass,
-                processOptionsCreator = { agentProcess ->
-                    val blackboard = agentProcess.processContext.blackboard.spawn()
-                    loggerFor<OperationContextPromptRunner>().info(
-                        "Creating subagent process for {} with blackboard {}",
-                        agent.name,
-                        blackboard,
-                    )
-                    ProcessOptions(
-                        verbosity = Verbosity(showPrompts = true),
-                        blackboard = blackboard,
-                    )
-                },
-            )
-        }
-        return copy(
-            otherTools = this.otherTools + newTools,
-        )
-    }
-
     override fun withPromptContributors(promptContributors: List<PromptContributor>): PromptRunner =
         copy(promptContributors = this.promptContributors + promptContributors)
 
@@ -360,7 +321,7 @@ internal data class OperationContextPromptRunner(
      */
     override fun supportsThinking(): Boolean = true
 
-    override fun withThinking(): PromptRunner.Thinking {
+    override fun thinking(): PromptRunner.Thinking {
         val llmOperations = context.agentPlatform().platformServices.llmOperations
 
         if (llmOperations !is ChatClientLlmOperations) {
@@ -404,5 +365,12 @@ internal data class OperationContextPromptRunner(
             guardRails = this.guardRails + guards
         )
     }
+
+    override fun <T : Any> withToolChainingFrom(
+        type: Class<T>,
+        predicate: DomainToolPredicate<T>,
+    ): PromptRunner = this
+
+    override fun withToolChainingFromAny(): PromptRunner = this
 
 }

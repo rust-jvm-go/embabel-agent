@@ -20,13 +20,14 @@ import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.dsl.Frog
 import com.embabel.agent.api.dsl.SnakeMeal
 import com.embabel.agent.api.event.AgenticEventListener.Companion.DevNull
+import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.core.*
 import com.embabel.agent.core.hitl.ConfirmationRequest
+import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.InMemoryBlackboard
+import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.SimpleAgentProcess
 import com.embabel.agent.domain.io.UserInput
-import com.embabel.agent.core.support.LlmInteraction
-import com.embabel.agent.spi.LlmOperations
 import com.embabel.agent.spi.support.DefaultPlannerFactory
 import com.embabel.agent.support.Dog
 import com.embabel.agent.test.integration.IntegrationTestUtils
@@ -42,7 +43,6 @@ import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.core.Agent as CoreAgent
 
 
@@ -757,40 +757,29 @@ class AgentMetadataReaderActionTest {
             assertEquals(DefaultModelSelectionCriteria, llmi.captured.llm.criteria)
         }
 
-        @Test
-        fun `prompt action invocation with tools on domain object parameter via using`() {
-            testToolsAreExposed(FromPersonUsesDomainObjectTools())
-        }
-
-        @Test
-        fun `prompt action invocation with tools on domain object parameter via ActionContext`() {
-            testToolsAreExposed(FromPersonUsesDomainObjectToolsViaActionContext())
-        }
-
-        @Test
-        fun `prompt action invocation with tools on domain object parameter via ExecutingOperationContext`() {
-            testToolsAreExposed(FromPersonUsesDomainObjectToolsViaExecutingOperationContext())
-        }
+        // Note: Tests for automatic tool exposure from domain object parameters were removed
+        // because that behavior was undocumented and surprising. Domain object tools must be
+        // explicitly added via withToolObject() as documented in reference/domain/page.adoc.
 
         @Test
         fun `prompt action invocation with tool object passed in via using`() {
-            testToolsAreExposed(FromPersonUsesObjectToolsViaUsing(), expectedToolCount = 2)
+            testToolsAreExposed(FromPersonUsesObjectToolsViaUsing(), expectedToolCount = 1)
         }
 
         @Test
         fun `prompt action invocation with tool object passed in via context`() {
-            testToolsAreExposed(FromPersonUsesObjectToolsViaContext(), expectedToolCount = 2)
+            testToolsAreExposed(FromPersonUsesObjectToolsViaContext(), expectedToolCount = 1)
         }
 
         @Test
         fun `prompt action invocation with tool object passed in via ai`() {
-            testToolsAreExposed(FromPersonUsesObjectToolsViaAi(), expectedToolCount = 2)
+            testToolsAreExposed(FromPersonUsesObjectToolsViaAi(), expectedToolCount = 1)
         }
 
         @Test
         fun `prompt action invocation with tool object passed in via using with renaming`() {
             val tools =
-                testToolsAreExposed(FromPersonUsesObjectToolsViaUsingWithRenaming(), expectedToolCount = 2)
+                testToolsAreExposed(FromPersonUsesObjectToolsViaUsingWithRenaming(), expectedToolCount = 1)
             assertTrue(
                 tools.any { it.definition.name == "_thing" },
                 "Should have renamed thing tool, had ${tools.map { it.definition.name }}",
@@ -800,7 +789,7 @@ class AgentMetadataReaderActionTest {
         @Test
         fun `prompt action invocation with tool object passed in via context with renaming`() {
             val tools =
-                testToolsAreExposed(FromPersonUsesObjectToolsViaContextWithRenaming(), expectedToolCount = 2)
+                testToolsAreExposed(FromPersonUsesObjectToolsViaContextWithRenaming(), expectedToolCount = 1)
             assertTrue(
                 tools.any { it.definition.name == "_thing" },
                 "Should have renamed thing tool, had ${tools.map { it.definition.name }}",
@@ -892,7 +881,12 @@ class AgentMetadataReaderActionTest {
                 llmo.captured.tools.size,
                 "Should have $expectedToolCount tools, had ${llmo.captured.tools.map { it.definition.name }}",
             )
-            assertTrue(llmo.captured.tools.any { it.definition.name == "reverse" })
+            // Note: We check for "thing" from FunnyTool, not "reverse" from PersonWithReverseTool
+            // because domain object tools are NOT automatically exposed - they must be explicitly added.
+            assertTrue(
+                llmo.captured.tools.any { it.definition.name == "thing" || it.definition.name == "_thing" },
+                "Should have 'thing' or '_thing' tool from FunnyTool, had ${llmo.captured.tools.map { it.definition.name }}",
+            )
             assertEquals(DefaultModelSelectionCriteria, llmo.captured.llm.criteria)
             return llmo.captured.tools
         }
@@ -1166,6 +1160,30 @@ class AgentMetadataReaderActionTest {
         @Disabled("Not yet implemented")
         fun `invoke method compose result with RequiresMatch`() {
 
+        }
+    }
+
+    @Nested
+    inner class ReadOnlyActions {
+
+        @Test
+        fun `action with readOnly true has readOnly property set`() {
+            val reader = AgentMetadataReader()
+            val metadata = reader.createAgentMetadata(AgentWithReadOnlyAction())
+            assertNotNull(metadata)
+            assertEquals(1, metadata!!.actions.size)
+            val action = metadata.actions.single()
+            assertTrue(action.readOnly, "Action with @Action(readOnly = true) should have readOnly = true")
+        }
+
+        @Test
+        fun `action without readOnly annotation defaults to false`() {
+            val reader = AgentMetadataReader()
+            val metadata = reader.createAgentMetadata(AgentWithNonReadOnlyAction())
+            assertNotNull(metadata)
+            assertEquals(1, metadata!!.actions.size)
+            val action = metadata.actions.single()
+            assertFalse(action.readOnly, "Action without readOnly should default to false")
         }
     }
 

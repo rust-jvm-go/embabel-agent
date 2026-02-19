@@ -15,9 +15,9 @@
  */
 package com.embabel.agent.api.tool
 
+import com.embabel.agent.api.tool.agentic.simple.SimpleAgenticTool
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.spi.config.spring.executingOperationContextFor
-import com.embabel.agent.spi.support.DelegatingTool
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.util.loggerFor
 
@@ -25,6 +25,13 @@ import com.embabel.common.util.loggerFor
  * Create a system prompt given the current [AgentProcess]
  * as context.
  */
+@Deprecated(
+    message = "Use AgenticSystemPromptCreator from com.embabel.agent.api.tool.agentic package",
+    replaceWith = ReplaceWith(
+        "AgenticSystemPromptCreator",
+        "com.embabel.agent.api.tool.agentic.AgenticSystemPromptCreator"
+    )
+)
 typealias SystemPromptCreator = (AgentProcess) -> String
 
 /**
@@ -43,6 +50,13 @@ typealias SystemPromptCreator = (AgentProcess) -> String
  * Default is false, meaning only artifacts from leaf tools are captured.
  * Set to true to capture all artifacts including those from nested agentic sub-tools.
  */
+@Deprecated(
+    message = "Use SimpleAgenticTool for flat tool orchestration, or PlaybookTool/StateMachineTool for controlled disclosure",
+    replaceWith = ReplaceWith(
+        "SimpleAgenticTool",
+        "com.embabel.agent.api.tool.agentic.simple.SimpleAgenticTool"
+    )
+)
 data class AgenticTool(
     override val definition: Tool.Definition,
     override val metadata: Tool.Metadata = Tool.Metadata.DEFAULT,
@@ -92,12 +106,14 @@ data class AgenticTool(
 
         // Wrap tools to capture any artifacts they produce
         val artifacts = mutableListOf<Any>()
+        val sink = ListSink(artifacts)
         val wrappedTools = tools.map { tool ->
-            ArtifactCapturingTool(
-                delegate = tool,
-                artifacts = artifacts,
-                captureNestedArtifacts = captureNestedArtifacts,
-            )
+            // Skip wrapping nested AgenticTools if captureNestedArtifacts is false
+            if (!captureNestedArtifacts && tool is AgenticTool) {
+                tool
+            } else {
+                ArtifactSinkingTool(tool, Any::class.java, sink)
+            }
         }
 
         val ai = executingOperationContextFor(agentProcess).ai()
@@ -187,44 +203,5 @@ data class AgenticTool(
             Use the provided tools to perform the following task:
             $description
             """.trimIndent()
-    }
-}
-
-/**
- * Tool wrapper that captures artifacts from [Tool.Result.WithArtifact] results.
- * Used internally by [AgenticTool] to collect artifacts produced by sub-tools.
- *
- * @param delegate The tool to wrap
- * @param artifacts Shared list to collect artifacts into
- * @param captureNestedArtifacts When false, artifacts from nested AgenticTools are skipped
- */
-internal class ArtifactCapturingTool(
-    override val delegate: Tool,
-    private val artifacts: MutableList<Any>,
-    private val captureNestedArtifacts: Boolean = false,
-) : DelegatingTool {
-
-    override val definition: Tool.Definition = delegate.definition
-    override val metadata: Tool.Metadata = delegate.metadata
-
-    /**
-     * Check if artifact capture should be skipped for this delegate.
-     * Returns true if delegate is an AgenticTool and captureNestedArtifacts is false.
-     */
-    fun shouldSkipCapture(): Boolean {
-        return !captureNestedArtifacts && delegate is AgenticTool
-    }
-
-    override fun call(input: String): Tool.Result {
-        val result = delegate.call(input)
-        if (result is Tool.Result.WithArtifact && !shouldSkipCapture()) {
-            artifacts.add(result.artifact)
-            loggerFor<ArtifactCapturingTool>().debug(
-                "Captured artifact of type {} from tool '{}'",
-                result.artifact::class.simpleName,
-                definition.name,
-            )
-        }
-        return result
     }
 }

@@ -15,19 +15,34 @@
  */
 package com.embabel.agent.api.annotation.support
 
-import com.embabel.agent.api.annotation.*
-import com.embabel.agent.api.common.*
-import com.embabel.agent.api.dsl.*
+import com.embabel.agent.api.annotation.AchievesGoal
+import com.embabel.agent.api.annotation.Action
+import com.embabel.agent.api.annotation.Agent
+import com.embabel.agent.api.annotation.Condition
+import com.embabel.agent.api.annotation.EmbabelComponent
+import com.embabel.agent.api.annotation.LlmTool
+import com.embabel.agent.api.annotation.RequireNameMatch
+import com.embabel.agent.api.common.ActionContext
+import com.embabel.agent.api.common.Ai
+import com.embabel.agent.api.common.OperationContext
+import com.embabel.agent.api.common.SomeOf
+import com.embabel.agent.api.common.TransformationActionContext
+import com.embabel.agent.api.common.createObject
+import com.embabel.agent.api.dsl.Frog
+import com.embabel.agent.api.dsl.SnakeMeal
+import com.embabel.agent.api.dsl.chain
+import com.embabel.agent.api.dsl.evenMoreEvilWizard
+import com.embabel.agent.api.dsl.runAgent
+import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.Goal
 import com.embabel.agent.core.ProcessContext
-import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.agent.core.hitl.ConfirmationRequest
+import com.embabel.agent.core.hitl.waitFor
 import com.embabel.agent.core.last
 import com.embabel.agent.domain.io.UserInput
 import com.embabel.agent.support.Dog
 import com.embabel.common.ai.model.LlmOptions
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize
-import org.junit.jupiter.api.Assertions.assertEquals
 
 data class PersonWithReverseTool(val name: String) {
 
@@ -513,41 +528,10 @@ class OnePromptActionWithToolOnly(
 
 }
 
-@EmbabelComponent
-class FromPersonUsesDomainObjectTools {
-
-    @Action
-    fun fromPerson(
-        person: PersonWithReverseTool,
-        context: OperationContext,
-    ): UserInput {
-        return context.ai().withDefaultLlm().createObject("Create a UserInput")
-    }
-}
-
-@EmbabelComponent
-class FromPersonUsesDomainObjectToolsViaActionContext {
-
-    @Action
-    fun fromPerson(
-        person: PersonWithReverseTool,
-        context: ActionContext,
-    ): UserInput {
-        return context.promptRunner().createObject("Create a UserInput")
-    }
-}
-
-@EmbabelComponent
-class FromPersonUsesDomainObjectToolsViaExecutingOperationContext {
-
-    @Action
-    fun fromPerson(
-        person: PersonWithReverseTool,
-        context: ExecutingOperationContext,
-    ): UserInput {
-        return context.promptRunner().createObject("Create a UserInput")
-    }
-}
+// Note: FromPersonUsesDomainObjectTools, FromPersonUsesDomainObjectToolsViaActionContext,
+// and FromPersonUsesDomainObjectToolsViaExecutingOperationContext were removed because
+// they tested undocumented automatic tool exposure from domain object parameters.
+// Domain object tools must be explicitly added via withToolObject().
 
 @EmbabelComponent
 class FromPersonUsesObjectToolsViaUsing {
@@ -587,9 +571,12 @@ class FromPersonUsesObjectToolsViaUsingWithFilter {
         person: PersonWithReverseTool,
         context: OperationContext,
     ): UserInput {
+        // Filter that allows all tools (returns true). Previously this test used { false } which
+        // filtered out all tools, but the test was expecting 1 tool because domain objects were
+        // automatically exposed (which is now removed as undocumented behavior).
         return context.ai().withDefaultLlm()
             .withToolObject(
-                ToolObject(FunnyTool()).withNamingStrategy { "_$it" }.withFilter { false },
+                ToolObject(FunnyTool()).withNamingStrategy { "_$it" }.withFilter { true },
             ).createObject("Create a UserInput")
     }
 }
@@ -815,4 +802,22 @@ class MostSpecificPath {
         frog: Frog,
     ) = Prince(frog.name)
 
+}
+
+@Agent(description = "agent with read-only action")
+class AgentWithReadOnlyAction {
+
+    @Action(readOnly = true)
+    fun analyzeData(userInput: UserInput): PersonWithReverseTool {
+        return PersonWithReverseTool(userInput.content)
+    }
+}
+
+@Agent(description = "agent with non-read-only action")
+class AgentWithNonReadOnlyAction {
+
+    @Action
+    fun modifyData(userInput: UserInput): PersonWithReverseTool {
+        return PersonWithReverseTool(userInput.content)
+    }
 }

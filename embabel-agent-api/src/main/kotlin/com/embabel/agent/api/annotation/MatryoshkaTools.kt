@@ -16,58 +16,20 @@
 package com.embabel.agent.api.annotation
 
 /**
- * Marks a class as a MatryoshkaTool container.
+ * Marks a class as an UnfoldingTool container for progressive tool disclosure.
  *
- * When applied to a class containing `@LlmTool` methods, creates a facade tool
- * that exposes those methods when invoked. This enables progressive tool disclosure.
- *
- * Example - Simple facade:
- * ```java
- * @MatryoshkaTools(
- *     name = "database_operations",
- *     description = "Database operations. Invoke to see specific tools."
- * )
- * public class DatabaseTools {
- *
- *     @LlmTool(description = "Execute a SQL query")
- *     public QueryResult query(String sql) { ... }
- *
- *     @LlmTool(description = "Insert a record")
- *     public InsertResult insert(String table, Map<String, Object> data) { ... }
- * }
- *
- * // Create the MatryoshkaTool
- * MatryoshkaTool tool = MatryoshkaTool.fromInstance(new DatabaseTools());
- * ```
- *
- * Example - Category-based selection:
- * ```java
- * @MatryoshkaTools(
- *     name = "file_operations",
- *     description = "File operations. Pass category to select tools."
- * )
- * public class FileTools {
- *
- *     @LlmTool(description = "Read file contents", category = "read")
- *     public String readFile(String path) { ... }
- *
- *     @LlmTool(description = "List directory", category = "read")
- *     public List<String> listDir(String path) { ... }
- *
- *     @LlmTool(description = "Write file", category = "write")
- *     public void writeFile(String path, String content) { ... }
- *
- *     @LlmTool(description = "Delete file", category = "write")
- *     public void deleteFile(String path) { ... }
- * }
- *
- * // Creates a category-based MatryoshkaTool automatically
- * MatryoshkaTool tool = MatryoshkaTool.fromInstance(new FileTools());
- * ```
- *
+ * @deprecated Use [UnfoldingTools] instead. This annotation is retained for backward compatibility.
+ * @see UnfoldingTools
  * @see LlmTool
- * @see com.embabel.agent.api.tool.MatryoshkaTool.Companion.fromInstance
+ * @see com.embabel.agent.api.tool.progressive.UnfoldingTool.Factory.fromInstance
  */
+@Deprecated(
+    message = "Use @UnfoldingTools instead",
+    replaceWith = ReplaceWith(
+        "UnfoldingTools",
+        "com.embabel.agent.api.annotation.UnfoldingTools"
+    )
+)
 @Target(AnnotationTarget.CLASS)
 @Retention(AnnotationRetention.RUNTIME)
 annotation class MatryoshkaTools(

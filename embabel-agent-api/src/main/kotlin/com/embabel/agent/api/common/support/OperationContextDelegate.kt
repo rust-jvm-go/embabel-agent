@@ -17,21 +17,25 @@ package com.embabel.agent.api.common.support
 
 import com.embabel.agent.api.common.*
 import com.embabel.agent.api.common.support.streaming.StreamingCapabilityDetector
+import com.embabel.agent.api.tool.ArtifactSinkingTool
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolObject
+import com.embabel.agent.api.tool.agentic.DomainToolFactory
+import com.embabel.agent.api.tool.agentic.DomainToolPredicate
+import com.embabel.agent.api.tool.agentic.DomainToolSource
+import com.embabel.agent.api.tool.agentic.DomainToolTracker
+import com.embabel.agent.api.tool.agentic.simple.DomainAwareSink
+import com.embabel.agent.spi.loop.ToolChainingInjectionStrategy
+import com.embabel.agent.spi.loop.ToolInjectionStrategy
 import com.embabel.agent.api.validation.guardrails.GuardRail
-import com.embabel.agent.core.ProcessOptions
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
-import com.embabel.agent.core.Verbosity
+import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetTools
 import com.embabel.agent.experimental.primitive.Determination
-import com.embabel.agent.spi.LlmOperations
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.agent.spi.support.springai.streaming.StreamingChatClientOperations
-import com.embabel.agent.tools.agent.AgentTool
-import com.embabel.agent.tools.agent.Handoffs
-import com.embabel.agent.tools.agent.PromptedTextCommunicator
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.ImagePart
 import com.embabel.chat.Message
@@ -47,6 +51,7 @@ import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.loggerFor
 import com.fasterxml.jackson.databind.ObjectMapper
 import reactor.core.publisher.Flux
+import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Predicate
 
 /**
@@ -67,6 +72,9 @@ internal data class OperationContextDelegate(
     override val validation: Boolean = true,
     private val otherTools: List<Tool> = emptyList(),
     private val guardRails: List<GuardRail> = emptyList(),
+    override val domainToolSources: List<DomainToolSource<*>> = emptyList(),
+    override val autoDiscovery: Boolean = false,
+    override val injectionStrategies: List<ToolInjectionStrategy> = emptyList(),
 ) : PromptExecutionDelegate {
 
     val action = (context as? ActionContext)?.action
@@ -103,45 +111,6 @@ internal data class OperationContextDelegate(
 
     override fun withTool(tool: Tool): PromptExecutionDelegate = copy(otherTools = this.otherTools + tool)
 
-    override fun withHandoffs(vararg outputTypes: Class<*>): PromptExecutionDelegate {
-        val handoffs = Handoffs(
-            autonomy = context.agentPlatform().platformServices.autonomy(),
-            outputTypes = outputTypes.toList(),
-            applicationName = context.agentPlatform().name,
-        )
-        return copy(
-            otherTools = this.otherTools + handoffs.tools,
-        )
-    }
-
-    override fun withSubagents(vararg subagents: Subagent): PromptExecutionDelegate {
-        val newTools = subagents.map { subagent ->
-            val agent = subagent.resolve(context.agentPlatform())
-            AgentTool(
-                autonomy = context.agentPlatform().platformServices.autonomy(),
-                agent = agent,
-                textCommunicator = PromptedTextCommunicator,
-                objectMapper = context.agentPlatform().platformServices.objectMapper,
-                inputType = subagent.inputClass,
-                processOptionsCreator = { agentProcess ->
-                    val blackboard = agentProcess.processContext.blackboard.spawn()
-                    loggerFor<OperationContextDelegate>().info(
-                        "Creating subagent process for {} with blackboard {}",
-                        agent.name,
-                        blackboard,
-                    )
-                    ProcessOptions(
-                        verbosity = Verbosity(showPrompts = true),
-                        blackboard = blackboard,
-                    )
-                },
-            )
-        }
-        return copy(
-            otherTools = this.otherTools + newTools,
-        )
-    }
-
     override fun withPromptContributors(promptContributors: List<PromptContributor>): PromptExecutionDelegate =
         copy(promptContributors = this.promptContributors + promptContributors)
 
@@ -161,6 +130,55 @@ internal data class OperationContextDelegate(
     override fun withGuardRails(vararg guards: GuardRail): PromptExecutionDelegate =
         copy(guardRails = this.guardRails + guards)
 
+    override fun <T : Any> withToolChainingFrom(
+        type: Class<T>,
+        predicate: DomainToolPredicate<T>,
+    ): PromptExecutionDelegate =
+        copy(domainToolSources = domainToolSources + DomainToolSource(type, predicate))
+
+    override fun withToolChainingFromAny(): PromptExecutionDelegate =
+        copy(autoDiscovery = true)
+
+    override fun withInjectionStrategies(strategies: List<ToolInjectionStrategy>): PromptExecutionDelegate =
+        copy(injectionStrategies = this.injectionStrategies + strategies)
+
+    private val hasDomainToolConfig: Boolean
+        get() = domainToolSources.isNotEmpty() || autoDiscovery
+
+    private data class ResolvedToolConfig(
+        val tools: List<Tool>,
+        val injectionStrategies: List<ToolInjectionStrategy> = emptyList(),
+    )
+
+    /**
+     * Resolve the effective tools list and injection strategies,
+     * wrapping with domain tool tracking if configured.
+     */
+    private fun resolveToolConfig(): ResolvedToolConfig {
+        val baseTools = safelyGetTools(toolObjects) + otherTools
+        if (!hasDomainToolConfig) {
+            return ResolvedToolConfig(baseTools, injectionStrategies)
+        }
+        val domainToolTracker = DomainToolTracker(
+            sources = domainToolSources,
+            autoDiscovery = autoDiscovery,
+            agentProcess = context.processContext.agentProcess,
+        )
+        val artifacts = mutableListOf<Any>()
+        val sink = DomainAwareSink(artifacts, domainToolTracker)
+        val wrappedTools = baseTools.map { tool ->
+            ArtifactSinkingTool(tool, Any::class.java, sink)
+        }
+        val domainPlaceholderTools = domainToolSources.flatMap { source ->
+            DomainToolFactory.createPlaceholderTools(source, domainToolTracker)
+        }
+        val strategies = injectionStrategies + if (autoDiscovery) {
+            listOf(ToolChainingInjectionStrategy(domainToolTracker))
+        } else {
+            emptyList()
+        }
+        return ResolvedToolConfig(wrappedTools + domainPlaceholderTools, strategies)
+    }
 
     // Execution methods
     override fun <T> createObject(
@@ -173,18 +191,20 @@ internal data class OperationContextDelegate(
             )
         }
         val combinedMessages = combineImagesWithMessages(this.messages + messages)
+        val toolConfig = resolveToolConfig()
         return context.processContext.createObject(
             messages = combinedMessages,
             interaction = LlmInteraction(
                 llm = llm,
                 toolGroups = this.toolGroups + toolGroups,
-                tools = safelyGetTools(toolObjects) + otherTools,
+                tools = toolConfig.tools,
                 promptContributors = allPromptContributors,
                 id = interactionId ?: idForPrompt(outputClass),
                 generateExamples = generateExamples,
                 propertyFilter = propertyFilter,
                 validation = validation,
                 guardRails = guardRails,
+                additionalInjectionStrategies = toolConfig.injectionStrategies,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -197,12 +217,13 @@ internal data class OperationContextDelegate(
         outputClass: Class<T>,
     ): T? {
         val combinedMessages = combineImagesWithMessages(this.messages + messages)
+        val toolConfig = resolveToolConfig()
         val result = context.processContext.createObjectIfPossible<T>(
             messages = combinedMessages,
             interaction = LlmInteraction(
                 llm = llm,
                 toolGroups = this.toolGroups + toolGroups,
-                tools = safelyGetTools(toolObjects) + otherTools,
+                tools = toolConfig.tools,
                 promptContributors = promptContributors + contextualPromptContributors.map {
                     it.toPromptContributor(
                         context
@@ -213,6 +234,7 @@ internal data class OperationContextDelegate(
                 propertyFilter = propertyFilter,
                 validation = validation,
                 guardRails = guardRails,
+                additionalInjectionStrategies = toolConfig.injectionStrategies,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -232,7 +254,11 @@ internal data class OperationContextDelegate(
     private fun idForPrompt(
         outputClass: Class<*>,
     ): InteractionId {
-        return InteractionId("${context.operation.name}-${outputClass.name}")
+        return InteractionId("${context.operation.name}-${outputClass.name}-${callCounter.incrementAndGet()}")
+    }
+
+    companion object {
+        private val callCounter = AtomicLong(0)
     }
 
     /**
@@ -306,11 +332,12 @@ internal data class OperationContextDelegate(
         )
     }
 
-    private fun streamingInteraction(): LlmInteraction =
-        LlmInteraction(
+    private fun streamingInteraction(): LlmInteraction {
+        val toolConfig = resolveToolConfig()
+        return LlmInteraction(
             llm = llm,
             toolGroups = toolGroups,
-            tools = safelyGetTools(toolObjects) + otherTools,
+            tools = toolConfig.tools,
             promptContributors = promptContributors + contextualPromptContributors.map {
                 it.toPromptContributor(context)
             },
@@ -318,7 +345,9 @@ internal data class OperationContextDelegate(
             generateExamples = generateExamples,
             propertyFilter = propertyFilter,
             guardRails = guardRails,
+            additionalInjectionStrategies = toolConfig.injectionStrategies,
         )
+    }
 
     override fun supportsThinking(): Boolean = true
 
@@ -332,7 +361,9 @@ internal data class OperationContextDelegate(
             messages = combinedMessages,
             interaction = thinkingInteraction(),
             outputClass = outputClass,
-            llmRequestEvent = null
+            llmRequestEvent = null,
+            agentProcess = context.agentProcess,
+            action = action,
         )
     }
 
@@ -346,7 +377,9 @@ internal data class OperationContextDelegate(
             messages = combinedMessages,
             interaction = thinkingInteraction(),
             outputClass = outputClass,
-            llmRequestEvent = null
+            llmRequestEvent = null,
+            agentProcess = context.agentProcess,
+            action = action,
         )
 
         return when {
@@ -414,10 +447,11 @@ internal data class OperationContextDelegate(
 
     private fun thinkingInteraction(): LlmInteraction {
         val thinkingEnabledLlm = llm.withThinking(Thinking.withExtraction())
+        val toolConfig = resolveToolConfig()
         return LlmInteraction(
             llm = thinkingEnabledLlm,
             toolGroups = toolGroups,
-            tools = safelyGetTools(toolObjects) + otherTools,
+            tools = toolConfig.tools,
             promptContributors = promptContributors + contextualPromptContributors.map {
                 it.toPromptContributor(context)
             },
@@ -425,6 +459,7 @@ internal data class OperationContextDelegate(
             generateExamples = generateExamples,
             propertyFilter = propertyFilter,
             guardRails = guardRails,
+            additionalInjectionStrategies = toolConfig.injectionStrategies,
         )
     }
 

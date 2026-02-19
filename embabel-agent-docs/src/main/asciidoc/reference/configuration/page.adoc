@@ -7,29 +7,37 @@ Annotate your Spring Boot application class to get agentic behavior.
 
 Example:
 
+[tabs]
+====
+Java::
++
 [source,java]
 ----
 @SpringBootApplication
-class MyAgentApplication {
+public class MyAgentApplication {
     public static void main(String[] args) {
         SpringApplication.run(MyAgentApplication.class, args);
     }
 }
 ----
 
+Kotlin::
++
+[source,kotlin]
+----
+@SpringBootApplication
+class MyAgentApplication
+
+fun main(args: Array<String>) {
+    runApplication<MyAgentApplication>(*args)
+}
+----
+====
+
 This is a normal Spring Boot application class.
 You can add other Spring Boot annotations as needed.
-Add the following dependency to your `pom.xml` to include the Ollama model provider starter:
 
-[source,xml]
-----
-<dependency>
-    <groupId>com.embabel.agent</groupId>
-    <artifactId>embabel-agent-starter-ollama</artifactId>
-</dependency>
-----
-
-Other providers such as OpenAI, Anthropic, AWS Bedrock, Docker Models, etc. can be added similarly by including their respective starter dependencies.
+You also need to add the <<reference.environment_setup,dependency and configuration for your LLM provider(s) of choice>>.
 
 ==== Configuration Properties
 
@@ -369,7 +377,21 @@ Uses the native Google GenAI SDK (`spring-ai-google-genai`) for direct access to
 
 |===
 
-Google GenAI models are configured via the `embabel-agent-starter-google-genai` starter dependency.
+Google GenAI models (both LLM and embedding) are configured via the `embabel-agent-starter-google-genai` starter dependency.
+
+The following embedding models are available:
+
+[cols="2,3,1,1",options="header"]
+|===
+|Model Name |Model ID |Dimensions |Price (per 1M tokens)
+
+|`gemini_embedding_001`
+|`gemini-embedding-001`
+|3072
+|$0.15
+
+|===
+
 The following environment variables control authentication:
 
 [cols="2,4",options="header"]
@@ -392,12 +414,49 @@ NOTE: Either `GOOGLE_API_KEY` or both `GOOGLE_PROJECT_ID` and `GOOGLE_LOCATION` 
 IMPORTANT: Gemini 3 models are only available in the `global` location on Vertex AI.
 To use Gemini 3 with Vertex AI, you must set `GOOGLE_LOCATION=global`.
 
+To add new Google GenAI embedding models, edit the configuration file:
+
+----
+embabel-agent-autoconfigure/models/embabel-agent-google-genai-autoconfigure/
+  src/main/resources/models/google-genai-models.yml
+----
+
+[source,yaml]
+----
+embedding_models:
+  - name: "gemini_embedding_001"
+    model_id: "gemini-embedding-001"
+    display_name: "Gemini Embedding 001"
+    dimensions: 3072
+    pricing_model:
+      usd_per1m_tokens: 0.15
+----
+
 ===== HTTP Client Configuration
 
 From `NettyClientFactoryProperties` - configuration for the HTTP client used by model providers (OpenAI, Anthropic, etc.) when making API calls.
 
 Embabel uses Reactor Netty as the HTTP client for improved performance and non-blocking I/O.
 This is particularly important for LLM API calls which can have long response times.
+
+====== Dependency Requirement
+
+To use the Netty client, you must manually add the following autoconfiguration dependency to your project:
+
+[source,xml]
+----
+<dependency>
+    <groupId>com.embabel.agent</groupId>
+    <artifactId>embabel-agent-netty-client-autoconfigure</artifactId>
+</dependency>
+----
+
+For Gradle:
+
+[source,gradle]
+----
+implementation 'com.embabel.agent:embabel-agent-netty-client-autoconfigure'
+----
 
 [cols="3,2,1,4",options="header"]
 |===

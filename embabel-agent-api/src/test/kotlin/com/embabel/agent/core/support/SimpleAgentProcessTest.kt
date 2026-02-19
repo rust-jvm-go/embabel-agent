@@ -17,9 +17,7 @@ package com.embabel.agent.core.support
 
 import com.embabel.agent.api.annotation.AchievesGoal
 import com.embabel.agent.api.annotation.Action
-import com.embabel.agent.api.annotation.confirm
 import com.embabel.agent.api.annotation.support.AgentMetadataReader
-import com.embabel.agent.api.annotation.waitFor
 import com.embabel.agent.api.common.StuckHandler
 import com.embabel.agent.api.common.StuckHandlerResult
 import com.embabel.agent.api.common.StuckHandlingResultCode
@@ -28,8 +26,15 @@ import com.embabel.agent.api.dsl.agent
 import com.embabel.agent.api.dsl.evenMoreEvilWizard
 import com.embabel.agent.api.event.ObjectAddedEvent
 import com.embabel.agent.api.event.ObjectBoundEvent
-import com.embabel.agent.core.*
+import com.embabel.agent.core.Agent
+import com.embabel.agent.core.AgentProcess
+import com.embabel.agent.core.AgentProcessStatusCode
+import com.embabel.agent.core.IoBinding
+import com.embabel.agent.core.ProcessOptions
+import com.embabel.agent.core.ReplanRequestedException
 import com.embabel.agent.core.hitl.ConfirmationRequest
+import com.embabel.agent.core.hitl.confirm
+import com.embabel.agent.core.hitl.waitFor
 import com.embabel.agent.domain.io.UserInput
 import com.embabel.agent.domain.library.Person
 import com.embabel.agent.spi.support.DefaultPlannerFactory
@@ -200,7 +205,51 @@ val BlacklistTestAgent = agent("BlacklistTester", description = "Agent that test
     goal(name = "frog_goal", description = "Turn input into frog", satisfiedBy = Frog::class)
 }
 
+/**
+ * Agent that verifies AgentProcess.get() returns the current process during action execution.
+ */
+val AgentProcessContextTestAgent = agent("ContextTester", description = "Tests AgentProcess.get() availability") {
+    transformation<UserInput, LocalPerson>(name = "check_context") {
+        val currentProcess = AgentProcess.get()
+        requireNotNull(currentProcess) { "AgentProcess.get() should not return null during action execution" }
+        LocalPerson(name = "Context OK: ${it.input.content}")
+    }
+
+    transformation<LocalPerson, Frog>(name = "to_frog") {
+        Frog(it.input.name)
+    }
+
+    goal(name = "frog_goal", description = "Turn input into frog", satisfiedBy = Frog::class)
+}
+
 class SimpleAgentProcessTest {
+
+    @Nested
+    inner class AgentProcessContext {
+
+        @Test
+        fun `AgentProcess get() returns current process during action execution`() {
+            val dummyPlatformServices = dummyPlatformServices()
+            val blackboard = InMemoryBlackboard()
+            blackboard += UserInput("TestContext")
+
+            val agentProcess = SimpleAgentProcess(
+                id = "test-context",
+                agent = AgentProcessContextTestAgent,
+                processOptions = ProcessOptions(),
+                blackboard = blackboard,
+                platformServices = dummyPlatformServices,
+                plannerFactory = DefaultPlannerFactory,
+                parentId = null,
+            )
+
+            val result = agentProcess.run()
+
+            assertEquals(AgentProcessStatusCode.COMPLETED, result.status)
+            val frog = blackboard.lastResult() as Frog
+            assertTrue(frog.name.contains("Context OK"))
+        }
+    }
 
     @Nested
     inner class Serialization {
@@ -517,7 +566,11 @@ class SimpleAgentProcessTest {
                 parentId = null,
             )
             val result = agentProcess.run()
-            assertEquals(AgentProcessStatusCode.KILLED, result.status, "Process should remain killed after stuck handling")
+            assertEquals(
+                AgentProcessStatusCode.KILLED,
+                result.status,
+                "Process should remain killed after stuck handling"
+            )
         }
 
     }

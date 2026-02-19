@@ -21,8 +21,8 @@ import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.Operation
 import com.embabel.agent.core.ProcessContext
+import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
-import com.embabel.agent.spi.LlmOperations
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.chat.Message
 import com.embabel.common.ai.model.LlmOptions
@@ -85,7 +85,7 @@ class OperationContextPromptRunnerThinkingTest {
 
         // Test with default LlmOptions
         val defaultRunner = createOperationContextPromptRunner(context)
-        val defaultThinkingOps = defaultRunner.withThinking()
+        val defaultThinkingOps = defaultRunner.thinking()
         assertNotNull(defaultThinkingOps)
 
         // Test with custom LlmOptions (verifies preservation of settings)
@@ -93,14 +93,14 @@ class OperationContextPromptRunnerThinkingTest {
             .withMaxTokens(500)
             .withTemperature(0.7)
         val customRunner = createOperationContextPromptRunner(context, customLlmOptions)
-        val customThinkingOps = customRunner.withThinking()
+        val customThinkingOps = customRunner.thinking()
         assertNotNull(customThinkingOps)
 
         // Test with already thinking-enabled LlmOptions (verifies idempotency)
         val thinkingEnabledOptions = LlmOptions()
             .withThinking(Thinking.withExtraction())
         val thinkingRunner = createOperationContextPromptRunner(context, thinkingEnabledOptions)
-        val thinkingOps = thinkingRunner.withThinking()
+        val thinkingOps = thinkingRunner.thinking()
         assertNotNull(thinkingOps)
 
         // All should create valid, operational ThinkingPromptRunnerOperations
@@ -140,7 +140,7 @@ class OperationContextPromptRunnerThinkingTest {
 
         // When/Then: Should throw UnsupportedOperationException with descriptive message
         try {
-            runner.withThinking()
+            runner.thinking()
             fail("Expected UnsupportedOperationException to be thrown")
         } catch (e: UnsupportedOperationException) {
             val message = e.message ?: ""

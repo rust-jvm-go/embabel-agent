@@ -15,7 +15,8 @@
  */
 package com.embabel.agent.core
 
-import com.embabel.agent.api.annotation.AwaitableResponseException
+import com.embabel.agent.api.tool.ToolControlFlowSignal
+import com.embabel.agent.core.hitl.AwaitableResponseException
 import com.embabel.common.util.time
 import org.slf4j.LoggerFactory
 import java.time.Duration
@@ -67,6 +68,10 @@ interface ActionRunner {
                     // Propagate it up to the agent process for replanning.
                     throw rpe
                 } catch (t: Throwable) {
+                    if (t is ToolControlFlowSignal) {
+                        // Other control flow signals (e.g., UserInputRequiredException) must propagate
+                        throw t
+                    }
                     if (logger.isDebugEnabled) {
                         logger.debug(
                             "Unexpected error invoking action",

@@ -16,6 +16,7 @@
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.event.LlmRequestEvent
+import com.embabel.agent.api.event.ToolLoopStartEvent
 import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.core.LlmInvocation
 import com.embabel.agent.core.ReplanRequestedException
@@ -25,9 +26,10 @@ import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.spi.AutoLlmSelectionCriteriaResolver
 import com.embabel.agent.spi.LlmService
 import com.embabel.agent.spi.ToolDecorator
+import com.embabel.agent.spi.loop.ChainedToolInjectionStrategy
 import com.embabel.agent.spi.loop.LlmMessageSender
 import com.embabel.agent.spi.loop.ToolInjectionStrategy
-import com.embabel.agent.spi.loop.support.DefaultToolLoop
+import com.embabel.agent.spi.loop.ToolLoopFactory
 import com.embabel.agent.spi.support.guardrails.validateAssistantResponse
 import com.embabel.agent.spi.support.guardrails.validateUserInput
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator
@@ -94,6 +96,7 @@ open class ToolLoopLlmOperations(
     promptsProperties: LlmOperationsPromptsProperties = LlmOperationsPromptsProperties(),
     internal open val objectMapper: ObjectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
     protected val observationRegistry: ObservationRegistry = ObservationRegistry.NOOP,
+    protected val toolLoopFactory: ToolLoopFactory = ToolLoopFactory.default(),
 ) : AbstractLlmOperations(
     toolDecorator = toolDecorator,
     modelProvider = modelProvider,
@@ -113,7 +116,7 @@ open class ToolLoopLlmOperations(
         val llm = chooseLlm(interaction.llm)
         val promptContributions = buildPromptContributions(interaction, llm)
 
-        val messageSender = createMessageSender(llm, interaction.llm)
+        val messageSender = createMessageSender(llm, interaction.llm, llmRequestEvent)
 
         val converter = if (outputClass != String::class.java) {
             createOutputConverter(outputClass, interaction)
@@ -140,10 +143,18 @@ open class ToolLoopLlmOperations(
             }
         }
 
-        val toolLoop = DefaultToolLoop(
+        val injectionStrategy = if (interaction.additionalInjectionStrategies.isNotEmpty()) {
+            ChainedToolInjectionStrategy(
+                listOf(ToolInjectionStrategy.DEFAULT) + interaction.additionalInjectionStrategies
+            )
+        } else {
+            ToolInjectionStrategy.DEFAULT
+        }
+
+        val toolLoop = toolLoopFactory.create(
             llmMessageSender = messageSender,
             objectMapper = objectMapper,
-            injectionStrategy = ToolInjectionStrategy.DEFAULT,
+            injectionStrategy = injectionStrategy,
             maxIterations = interaction.maxToolIterations,
             toolDecorator = injectedToolDecorator,
         )
@@ -158,20 +169,42 @@ open class ToolLoopLlmOperations(
 
         val tools = interaction.tools
 
-        val observation = Observation.createNotStarted("embabel.tool-loop", observationRegistry)
-            .contextualName("Tool Loop Execution")
-
-        observation.start()
-        val result = try {
-            observation.openScope().use {
-                toolLoop.execute(
-                    initialMessages = initialMessages,
-                    initialTools = tools,
-                    outputParser = outputParser,
-                )
+        // Publish ToolLoopStartEvent before the tool loop
+        val toolLoopStartEvent = llmRequestEvent?.let { event ->
+            ToolLoopStartEvent(
+                agentProcess = event.agentProcess,
+                action = event.action,
+                toolNames = tools.map { it.definition.name },
+                maxIterations = interaction.maxToolIterations,
+                interactionId = interaction.id.value,
+                outputClass = outputClass,
+            ).also { startEvent ->
+                event.agentProcess.processContext.onProcessEvent(startEvent)
             }
-        } finally {
-            observation.stop()
+        }
+
+        // Tool loop tracing is handled by ToolLoopStartEvent/ToolLoopCompletedEvent
+        // to keep observability uniform across all agent events (actions, LLM calls, tools, etc.)
+        // rather than mixing Observation API inline with event-based tracing.
+        // val observation = Observation.createNotStarted("embabel.tool-loop", observationRegistry)
+        //     .contextualName("Tool Loop Execution")
+        // observation.start()
+        // ... observation.stop()
+
+        val result = toolLoop.execute(
+            initialMessages = initialMessages,
+            initialTools = tools,
+            outputParser = outputParser,
+        )
+
+        // Publish ToolLoopCompletedEvent after the tool loop
+        toolLoopStartEvent?.let { startEvent ->
+            llmRequestEvent.agentProcess.processContext.onProcessEvent(
+                startEvent.completedEvent(
+                    totalIterations = result.totalIterations,
+                    replanRequested = result.replanRequested,
+                )
+            )
         }
 
         result.totalUsage?.let { usage ->
@@ -220,11 +253,15 @@ open class ToolLoopLlmOperations(
      *
      * @param llm The LLM service to use
      * @param options The LLM options
+     * @param llmRequestEvent Optional domain context for instrumentation.
+     *        When present, subclasses may use this to wrap the underlying model
+     *        for observability (e.g., emitting events with the final prompt).
      * @return A framework-agnostic message sender
      */
     protected open fun createMessageSender(
         llm: LlmService<*>,
         options: LlmOptions,
+        llmRequestEvent: LlmRequestEvent<*>? = null,
     ): LlmMessageSender {
         return llm.createMessageSender(options)
     }

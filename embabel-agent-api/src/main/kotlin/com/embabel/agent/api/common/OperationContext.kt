@@ -21,7 +21,15 @@ import com.embabel.agent.api.dsl.TypedAgentScopeBuilder
 import com.embabel.agent.api.event.AgenticEventListener
 import com.embabel.agent.api.identity.User
 import com.embabel.agent.api.invocation.AgentInvocation
-import com.embabel.agent.core.*
+import com.embabel.agent.api.tool.ToolObject
+import com.embabel.agent.core.Action
+import com.embabel.agent.core.Agent
+import com.embabel.agent.core.AgentProcess
+import com.embabel.agent.core.Blackboard
+import com.embabel.agent.core.Operation
+import com.embabel.agent.core.ProcessContext
+import com.embabel.agent.core.ToolGroupConsumer
+import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.common.ai.model.EmbeddingService
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.ModelSelectionCriteria
@@ -176,13 +184,6 @@ inline fun <reified O : Any> ActionContext.asSubProcess(
  */
 interface InputsActionContext : ActionContext {
     val inputs: List<Any>
-
-    override fun domainObjectInstances(): List<Any> = inputs.flatMap { input ->
-        when (input) {
-            is List<*> -> input.filterNotNull()
-            else -> listOf(input)
-        }.distinct()
-    }
 }
 
 /**
@@ -222,9 +223,6 @@ class SupplierActionContext<O>(
     override val operation = action
 
     val inputs: List<Any> get() = emptyList()
-
-    override fun domainObjectInstances(): List<Any> = listOf(outputClass)
-
 }
 
 internal class OperationContextAi(

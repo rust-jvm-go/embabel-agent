@@ -16,14 +16,13 @@
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.annotation.LlmTool
-import com.embabel.agent.api.common.ToolObject
 import com.embabel.agent.api.dsl.evenMoreEvilWizard
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.Blackboard
 import com.embabel.agent.core.ReplanRequestedException
 import com.embabel.agent.core.support.safelyGetToolsFrom
-import com.embabel.agent.spi.support.springai.DefaultToolDecorator
 import com.embabel.agent.test.integration.IntegrationTestUtils.dummyAgentProcessRunning
 import com.embabel.common.ai.model.LlmOptions
 import io.mockk.mockk

@@ -15,18 +15,10 @@
  */
 package com.embabel.agent.api.tool
 
-import com.embabel.agent.api.annotation.LlmTool
-import com.embabel.agent.api.annotation.MatryoshkaTools
 import com.embabel.agent.api.tool.Tool.Definition
-import com.embabel.agent.core.ReplanRequestedException
-import com.embabel.agent.spi.support.DelegatingTool
+import com.embabel.agent.api.tool.progressive.UnfoldingTool
+import com.embabel.agent.core.DomainType
 import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import org.slf4j.LoggerFactory
-import kotlin.reflect.KFunction
-import kotlin.reflect.full.findAnnotation
-import kotlin.reflect.full.functions
-import kotlin.reflect.full.hasAnnotation
 
 /**
  * Tool information including definition and metadata,
@@ -117,6 +109,14 @@ interface Tool : ToolInfo {
             @JvmStatic
             fun of(vararg parameters: Parameter): InputSchema =
                 SimpleInputSchema(parameters.toList())
+
+            @JvmStatic
+            fun of(type: Class<*>): InputSchema =
+                TypeBasedInputSchema(type)
+
+            @JvmStatic
+            fun of(domainType: DomainType): InputSchema =
+                DomainTypeInputSchema(domainType)
 
             @JvmStatic
             fun empty(): InputSchema = SimpleInputSchema(emptyList())
@@ -268,8 +268,7 @@ interface Tool : ToolInfo {
         fun handle(input: String): Result
     }
 
-    companion object {
-        private val logger = LoggerFactory.getLogger(Tool::class.java)
+    companion object : TypedToolFactory, MethodToolFactory, ReplanningToolFactory, ArtifactSinkFactory {
 
         /**
          * Create a tool from a function.
@@ -386,196 +385,80 @@ interface Tool : ToolInfo {
             function = Function { input -> handler.handle(input) },
         )
 
-        /**
-         * Create a Tool from a method annotated with [com.embabel.agent.api.annotation.LlmTool].
-         *
-         * @param instance The object instance containing the method
-         * @param method The method to wrap as a tool
-         * @param objectMapper ObjectMapper for JSON parsing (optional)
-         * @return A Tool that invokes the method
-         * @throws IllegalArgumentException if the method is not annotated with @Tool.Method
-         */
-        fun fromMethod(
+        @JvmStatic
+        override fun <I : Any, O : Any> fromFunction(
+            name: String,
+            description: String,
+            inputType: Class<I>,
+            outputType: Class<O>,
+            function: java.util.function.Function<I, O>,
+        ): Tool = super.fromFunction(name, description, inputType, outputType, function)
+
+        @JvmStatic
+        override fun <I : Any, O : Any> fromFunction(
+            name: String,
+            description: String,
+            inputType: Class<I>,
+            outputType: Class<O>,
+            metadata: Metadata,
+            function: java.util.function.Function<I, O>,
+        ): Tool = super.fromFunction(name, description, inputType, outputType, metadata, function)
+
+        @JvmStatic
+        override fun <I : Any, O : Any> fromFunction(
+            name: String,
+            description: String,
+            inputType: Class<I>,
+            outputType: Class<O>,
+            metadata: Metadata,
+            objectMapper: ObjectMapper,
+            function: java.util.function.Function<I, O>,
+        ): Tool = super.fromFunction(name, description, inputType, outputType, metadata, objectMapper, function)
+
+        @JvmStatic
+        fun fromInstance(instance: Any): List<Tool> =
+            super.fromInstance(instance, com.fasterxml.jackson.module.kotlin.jacksonObjectMapper())
+
+        @JvmStatic
+        override fun fromInstance(
             instance: Any,
-            method: KFunction<*>,
-            objectMapper: ObjectMapper = jacksonObjectMapper(),
-        ): Tool {
-            val annotation = method.findAnnotation<LlmTool>()
-                ?: throw IllegalArgumentException(
-                    "Method ${method.name} is not annotated with @Tool.Method"
-                )
+            objectMapper: ObjectMapper,
+        ): List<Tool> = super.fromInstance(instance, objectMapper)
 
-            return MethodTool(
-                instance = instance,
-                method = method,
-                annotation = annotation,
-                objectMapper = objectMapper,
-            )
-        }
-
-        /**
-         * Create Tools from all methods annotated with [LlmTool] on an instance.
-         *
-         * If the instance's class is annotated with [@MatryoshkaTools][MatryoshkaTools],
-         * returns a single [MatryoshkaTool] containing all the inner tools.
-         * Otherwise, returns individual tools for each annotated method.
-         *
-         * @param instance The object instance to scan for annotated methods
-         * @param objectMapper ObjectMapper for JSON parsing (optional)
-         * @return List of Tools, one for each annotated method (or single MatryoshkaTool if @MatryoshkaTools present)
-         * @throws IllegalArgumentException if no methods are annotated with @LlmTool
-         */
         @JvmStatic
-        @JvmOverloads
-        fun fromInstance(
+        fun safelyFromInstance(instance: Any): List<Tool> =
+            super.safelyFromInstance(instance, com.fasterxml.jackson.module.kotlin.jacksonObjectMapper())
+
+        @JvmStatic
+        override fun safelyFromInstance(
             instance: Any,
-            objectMapper: ObjectMapper = jacksonObjectMapper(),
-        ): List<Tool> {
-            // Check for @MatryoshkaTools annotation first
-            if (instance::class.hasAnnotation<MatryoshkaTools>()) {
-                return listOf(MatryoshkaTool.fromInstance(instance, objectMapper))
-            }
+            objectMapper: ObjectMapper,
+        ): List<Tool> = super.safelyFromInstance(instance, objectMapper)
 
-            val tools = instance::class.functions
-                .filter { it.hasAnnotation<LlmTool>() }
-                .map { fromMethod(instance, it, objectMapper) }
-
-            if (tools.isEmpty()) {
-                throw IllegalArgumentException(
-                    "No methods annotated with @Tool.Method found on ${instance::class.simpleName}"
-                )
-            }
-
-            return tools
-        }
-
-        /**
-         * Safely create Tools from an instance, returning empty list if no annotated methods found.
-         * This is useful when you want to scan an object that may or may not have tool methods.
-         *
-         * @param instance The object instance to scan for annotated methods
-         * @param objectMapper ObjectMapper for JSON parsing (optional)
-         * @return List of Tools, or empty list if no annotated methods found
-         */
         @JvmStatic
-        @JvmOverloads
-        fun safelyFromInstance(
-            instance: Any,
-            objectMapper: ObjectMapper = jacksonObjectMapper(),
-        ): List<Tool> {
-            return try {
-                fromInstance(instance, objectMapper)
-            } catch (e: IllegalArgumentException) {
-                logger.debug("No @LlmTool annotations found on {}: {}", instance::class.simpleName, e.message)
-                emptyList()
-            } catch (e: Throwable) {
-                // Kotlin reflection can fail on some Java classes with KotlinReflectionInternalError (an Error, not Exception)
-                logger.debug(
-                    "Failed to scan {} for @LlmTool annotations: {}",
-                    instance::class.simpleName,
-                    e.message,
-                )
-                emptyList()
-            }
-        }
+        override fun replanAlways(tool: Tool): Tool = super.replanAlways(tool)
 
-        /**
-         * Make this tool always replan after execution, adding the artifact to the blackboard.
-         */
         @JvmStatic
-        fun replanAlways(tool: Tool): Tool {
-            return ConditionalReplanningTool(tool) { context ->
-                ReplanDecision("${tool.definition.name} replans") { bb ->
-                    context.artifact?.let { bb.addObject(it) }
-                }
-            }
-        }
-
-        /**
-         * When the decider returns a [ReplanDecision], replan after execution, adding the artifact
-         * to the blackboard along with any additional updates from the decision.
-         * The decider receives the artifact cast to type T and the replan context.
-         * If the artifact is null or cannot be cast to T, the decider is not called.
-         */
-        @JvmStatic
-        @Suppress("UNCHECKED_CAST")
-        fun <T> conditionalReplan(
+        override fun <T> conditionalReplan(
             tool: Tool,
             decider: (t: T, replanContext: ReplanContext) -> ReplanDecision?,
-        ): DelegatingTool {
-            return ConditionalReplanningTool(tool) { replanContext ->
-                val artifact = replanContext.artifact ?: return@ConditionalReplanningTool null
-                try {
-                    val decision = decider(artifact as T, replanContext)
-                        ?: return@ConditionalReplanningTool null
-                    ReplanDecision(decision.reason) { bb ->
-                        bb.addObject(artifact)
-                        decision.blackboardUpdater.accept(bb)
-                    }
-                } catch (_: ClassCastException) {
-                    null
-                }
-            }
-        }
+        ): DelegatingTool = super.conditionalReplan(tool, decider)
 
-        /**
-         * When the predicate matches the tool result artifact, replan, adding the artifact to the blackboard.
-         * The predicate receives the artifact cast to type T.
-         * If the artifact is null or cannot be cast to T, returns normally.
-         */
         @JvmStatic
-        @Suppress("UNCHECKED_CAST")
-        fun <T> replanWhen(
+        override fun <T> replanWhen(
             tool: Tool,
             predicate: (t: T) -> Boolean,
-        ): DelegatingTool {
-            return ConditionalReplanningTool(tool) { replanContext ->
-                val artifact = replanContext.artifact ?: return@ConditionalReplanningTool null
-                try {
-                    if (predicate(artifact as T)) {
-                        ReplanDecision("${tool.definition.name} replans based on result") { bb ->
-                            bb.addObject(artifact)
-                        }
-                    } else {
-                        null
-                    }
-                } catch (_: ClassCastException) {
-                    null
-                }
-            }
-        }
+        ): DelegatingTool = super.replanWhen(tool, predicate)
 
-        /**
-         * Replan and add the object returned by the predicate to the blackboard.
-         * @param tool The tool to wrap
-         * @param valueComputer Function that takes the artifact of type T and returns an object to add to the blackboard, or null to not replan
-         */
         @JvmStatic
-        @Suppress("UNCHECKED_CAST")
-        fun <T> replanAndAdd(
+        override fun <T> replanAndAdd(
             tool: Tool,
             valueComputer: (t: T) -> Any?,
-        ): DelegatingTool {
-            return ConditionalReplanningTool(tool) { replanContext ->
-                val artifact = replanContext.artifact ?: return@ConditionalReplanningTool null
-                try {
-                    val toAdd = valueComputer(artifact as T)
-                    if (toAdd != null) {
-                        ReplanDecision("${tool.definition.name} replans based on result") { bb ->
-                            bb.addObject(toAdd)
-                        }
-                    } else {
-                        null
-                    }
-                } catch (_: ClassCastException) {
-                    null
-                }
-            }
-        }
+        ): DelegatingTool = super.replanAndAdd(tool, valueComputer)
 
         /**
          * Format a list of tools as an ASCII tree structure.
-         * MatryoshkaTools are expanded recursively to show their inner tools.
+         * UnfoldingTools are expanded recursively to show their inner tools.
          *
          * @param name The name to display at the root of the tree
          * @param tools The list of tools to format
@@ -599,7 +482,7 @@ interface Tool : ToolInfo {
                 val prefix = if (isLast) "└── " else "├── "
                 val childIndent = indent + if (isLast) "    " else "│   "
 
-                if (tool is MatryoshkaTool) {
+                if (tool is UnfoldingTool) {
                     sb.append(indent).append(prefix).append(tool.definition.name)
                         .append(" (").append(tool.innerTools.size).append(" inner tools)\n")
                     formatToolsRecursive(sb, tool.innerTools, childIndent)
@@ -608,7 +491,50 @@ interface Tool : ToolInfo {
                 }
             }
         }
+
+        @JvmStatic
+        override fun <T : Any> sinkArtifacts(
+            tool: Tool,
+            clazz: Class<T>,
+            sink: ArtifactSink,
+        ): Tool = super.sinkArtifacts(tool, clazz, sink)
+
+        @JvmStatic
+        override fun <T : Any> sinkArtifacts(
+            tool: Tool,
+            clazz: Class<T>,
+            sink: ArtifactSink,
+            filter: (T) -> Boolean,
+            transform: (T) -> Any,
+        ): Tool = super.sinkArtifacts(tool, clazz, sink, filter, transform)
+
+        @JvmStatic
+        override fun publishToBlackboard(tool: Tool): Tool = super.publishToBlackboard(tool)
+
+        @JvmStatic
+        override fun <T : Any> publishToBlackboard(
+            tool: Tool,
+            clazz: Class<T>,
+        ): Tool = super.publishToBlackboard(tool, clazz)
+
+        @JvmStatic
+        override fun <T : Any> publishToBlackboard(
+            tool: Tool,
+            clazz: Class<T>,
+            filter: (T) -> Boolean,
+            transform: (T) -> Any,
+        ): Tool = super.publishToBlackboard(tool, clazz, filter, transform)
+
     }
+
+    /**
+     * Create a new tool with a different name.
+     * Useful for namespacing tools when combining multiple tool sources.
+     *
+     * @param newName The new name to use
+     * @return A new Tool with the updated name
+     */
+    fun withName(newName: String): Tool = RenamedTool(this, newName)
 
     /**
      * Create a new tool with a different description.
@@ -627,6 +553,27 @@ interface Tool : ToolInfo {
      * @return A new Tool with the note appended to its description
      */
     fun withNote(note: String): Tool = DescribedTool(this, "${definition.description}. $note")
+}
+
+/**
+ * A tool wrapper that overrides the name while delegating all functionality.
+ * Implements [DelegatingTool] to support unwrapping in injection strategies.
+ */
+private class RenamedTool(
+    override val delegate: Tool,
+    private val customName: String,
+) : DelegatingTool {
+
+    override val definition: Tool.Definition = Tool.Definition(
+        name = customName,
+        description = delegate.definition.description,
+        inputSchema = delegate.definition.inputSchema,
+    )
+
+    override val metadata: Tool.Metadata
+        get() = delegate.metadata
+
+    override fun call(input: String): Tool.Result = delegate.call(input)
 }
 
 /**

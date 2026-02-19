@@ -18,8 +18,8 @@ package com.embabel.agent.rag.service
 import com.embabel.agent.core.DataDictionary
 import com.embabel.agent.core.DomainType
 import com.embabel.agent.core.JvmType
+import com.embabel.agent.filter.PropertyFilter
 import com.embabel.agent.rag.filter.EntityFilter
-import com.embabel.agent.rag.filter.PropertyFilter
 import com.embabel.agent.rag.filter.matchesEntityFilter
 import com.embabel.agent.rag.model.NamedEntity
 import com.embabel.agent.rag.model.NamedEntityData
@@ -64,6 +64,26 @@ interface NamedEntityDataRepository : CoreSearchOperations, FinderOperations, Fi
      * instances implementing all matching interfaces based on entity labels.
      */
     val dataDictionary: DataDictionary
+
+    /**
+     * Create a context-scoped view of this repository,
+     * if possible. This implementation does nothing.
+     *
+     * Only returns entities that are mentioned in propositions belonging to the specified context.
+     * Uses the relationship pattern: Entity <-[:MENTIONS]- Proposition
+     *
+     * Example:
+     * ```kotlin
+     * val userScoped = repo.inContext(user.contextId)
+     * val contacts = userScoped.findByLabel("Contact") // Only contacts mentioned by this user
+     * ```
+     *
+     * @param contextId The context ID to scope queries to
+     * @return A narrowed repository that only returns entities mentioned in the context
+     */
+    fun withContextScope(contextId: String): NamedEntityDataRepository {
+        throw UnsupportedOperationException("Context scoping is not supported by this repository implementation")
+    }
 
     /**
      * Save an entity. If an entity with the same ID exists, it will be replaced.

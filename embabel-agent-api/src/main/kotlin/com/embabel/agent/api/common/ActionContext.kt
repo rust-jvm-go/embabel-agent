@@ -21,6 +21,7 @@ import com.embabel.agent.api.channel.ProgressOutputChannelEvent
 import com.embabel.agent.api.common.support.DelegatingStreamingPromptRunner
 import com.embabel.agent.api.common.support.OperationContextDelegate
 import com.embabel.agent.api.dsl.TypedAgentScopeBuilder
+import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.Action
 import com.embabel.agent.core.Agent
 import com.embabel.agent.core.AgentProcess
@@ -167,24 +168,17 @@ interface ActionContext : ExecutingOperationContext {
     ): PromptRunner {
         val promptContributorsToUse = (promptContributors + CurrentDate()).distinctBy { it.promptContribution().role }
 
-        val doi = domainObjectInstances()
         return DelegatingStreamingPromptRunner(
             delegate = OperationContextDelegate(
                 context = this,
                 llm = llm,
                 toolGroups = this.toolGroups + toolGroups,
-                toolObjects = (toolObjects + doi.map { ToolObject(it) }).distinct(),
+                toolObjects = toolObjects,
                 promptContributors = promptContributorsToUse,
                 contextualPromptContributors = contextualPromptContributors,
                 generateExamples = generateExamples,
             ),
         )
     }
-
-    /**
-     * Return the domain object instances that are relevant for this action context.
-     * They may expose tools.
-     */
-    fun domainObjectInstances(): List<Any>
 
 }

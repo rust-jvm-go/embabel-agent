@@ -1,5 +1,5 @@
 /*
- * Copyright 2024-2025 Embabel Software, Inc.
+ * Copyright 2024-2026 Embabel Pty Ltd.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -166,8 +166,8 @@ class LLMAnthropicStreamingBuilderIT {
         reactor.util.Loggers.useVerboseConsoleLoggers();
 
         // Given: Use the existing streaming test LLM (configured as "best")
-        PromptRunner runner = ai.withLlm("claude-sonnet-4-5");
-               // .withToolObject(Tooling.class);
+        PromptRunner runner = ai.withLlm("claude-sonnet-4-5")
+                             .withToolObject(Tooling.class);
         assertTrue(runner.supportsStreaming(), "Test LLM should support streaming");
 
         // When: Subscribe with real reactive callbacks using builder pattern
@@ -179,7 +179,7 @@ class LLMAnthropicStreamingBuilderIT {
 
         // Use StreamingPromptBuilder instead of Kotlin extension function
         Flux<StreamingEvent<MonthItem>> results = new StreamingPromptRunnerBuilder(runner)
-                .withStreaming()
+                .streaming()
                 .withPrompt(prompt)
                 .createObjectStreamWithThinking(MonthItem.class);
 

@@ -18,6 +18,7 @@ package com.embabel.chat.support.console
 import com.embabel.agent.api.channel.*
 import com.embabel.agent.spi.logging.ColorPalette
 import com.embabel.agent.spi.logging.DefaultColorPalette
+import com.embabel.chat.Message
 import com.embabel.common.util.color
 import org.apache.commons.text.WordUtils
 
@@ -29,7 +30,7 @@ class ConsoleOutputChannel(
         when (event) {
             is MessageOutputChannelEvent -> {
                 val formattedResponse = WordUtils.wrap(
-                    "${event.message.sender}: ${event.message.content.color(colorPalette.color2)}",
+                    "${event.message.role.displayName}: ${event.message.content.color(colorPalette.color2)}",
                     140,
                 )
                 println(formattedResponse)

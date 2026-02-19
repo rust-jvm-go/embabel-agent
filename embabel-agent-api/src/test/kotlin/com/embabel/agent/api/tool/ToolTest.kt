@@ -292,9 +292,9 @@ class ToolTest {
             assertTrue(json.contains("\"items\""), "Schema should have items property for array: $json")
             assertTrue(
                 json.contains("\"items\":{\"type\":\"number\"}") ||
-                    json.contains("\"items\": {\"type\": \"number\"}") ||
-                    json.contains("\"items\":{\"type\":\"integer\"}") ||
-                    json.contains("\"items\": {\"type\": \"integer\"}"),
+                        json.contains("\"items\": {\"type\": \"number\"}") ||
+                        json.contains("\"items\":{\"type\":\"integer\"}") ||
+                        json.contains("\"items\": {\"type\": \"integer\"}"),
                 "Array items should have numeric type: $json"
             )
         }
@@ -313,7 +313,7 @@ class ToolTest {
             assertTrue(json.contains("\"items\""), "Schema should have items property for array: $json")
             assertTrue(
                 json.contains("\"items\":{\"type\":\"string\"}") ||
-                    json.contains("\"items\": {\"type\": \"string\"}"),
+                        json.contains("\"items\": {\"type\": \"string\"}"),
                 "Array items should have string type: $json"
             )
         }
@@ -630,7 +630,8 @@ class ToolTest {
             val tools = Tool.fromInstance(ComplexParameterTools())
             val tool = tools.find { it.definition.name == "handleNested" }!!
 
-            val result = tool.call("""{"wrapper": {"address": {"street": "123 Main", "city": "Boston", "zipCode": "02101"}, "label": "Home"}}""")
+            val result =
+                tool.call("""{"wrapper": {"address": {"street": "123 Main", "city": "Boston", "zipCode": "02101"}, "label": "Home"}}""")
 
             assertTrue(result is Tool.Result.Text)
             assertEquals("Home: Boston", (result as Tool.Result.Text).content)
@@ -669,21 +670,24 @@ class ToolTest {
 
             val result = sumTool.call("""{"a": 5, "b": 3}""")
 
-            assertTrue(result is Tool.Result.Text)
-            assertEquals("8", (result as Tool.Result.Text).content)
+            assertTrue(result is Tool.Result.WithArtifact)
+            assertEquals("8", (result as Tool.Result.WithArtifact).content)
         }
 
         @Test
-        fun `executes method returning complex object`() {
+        fun `executes method returning complex object produces WithArtifact`() {
             val tools = Tool.fromInstance(ComplexTools())
             val createTool = tools.find { it.definition.name == "createPerson" }!!
 
             val result = createTool.call("""{"name": "Alice", "age": 30}""")
 
-            assertTrue(result is Tool.Result.Text)
-            val content = (result as Tool.Result.Text).content
-            assertTrue(content.contains("Alice"))
-            assertTrue(content.contains("30"))
+            assertTrue(result is Tool.Result.WithArtifact)
+            val artifactResult = result as Tool.Result.WithArtifact
+            assertTrue(artifactResult.content.contains("Alice"))
+            assertTrue(artifactResult.content.contains("30"))
+            val person = artifactResult.artifact as Person
+            assertEquals("Alice", person.name)
+            assertEquals(30, person.age)
         }
 
         @Test
@@ -795,7 +799,7 @@ class ToolTest {
 
             val modified = original.withDescription("New description")
 
-            assertTrue(modified is com.embabel.agent.spi.support.DelegatingTool)
+            assertTrue(modified is DelegatingTool)
         }
     }
 

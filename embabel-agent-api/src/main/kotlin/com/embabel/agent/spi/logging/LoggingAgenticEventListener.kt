@@ -42,6 +42,8 @@ import com.embabel.agent.api.event.ReplanRequestedEvent
 import com.embabel.agent.api.event.StateTransitionEvent
 import com.embabel.agent.api.event.ToolCallRequestEvent
 import com.embabel.agent.api.event.ToolCallResponseEvent
+import com.embabel.agent.api.event.ToolLoopCompletedEvent
+import com.embabel.agent.api.event.ToolLoopStartEvent
 import com.embabel.agent.core.AgentProcessStatusCode
 import com.embabel.agent.core.EarlyTermination
 import com.embabel.agent.spi.logging.personality.severance.LumonColorPalette
@@ -54,6 +56,8 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.slf4j.Logger
 import org.slf4j.LoggerFactory
+import org.springframework.ai.chat.messages.AssistantMessage as SpringAiAssistantMessage
+import org.springframework.ai.chat.messages.ToolResponseMessage
 import org.springframework.ai.chat.prompt.Prompt
 
 interface LoggingPersonality {
@@ -189,9 +193,9 @@ open class LoggingAgenticEventListener(
 
     protected open fun getAgentProcessPlanFormulatedEventMessage(e: AgentProcessPlanFormulatedEvent): String =
         """|[${e.processId}] formulated plan:
-           |${e.plan.infoString(e.agentProcess.processContext.processOptions.verbosity.showLongPlans, 1)}
+           |${e.plan.infoString(e.agentProcess.processOptions.verbosity.showLongPlans, 1)}
            |from:
-           |${e.worldState.infoString(verbose = true, indent = 1)}
+           |${e.worldState.infoString(verbose = e.agentProcess.processOptions.verbosity.showLongPlans, indent = 1)}
            |"""
             .trimMargin()
             .indentLines(level = 1, skipIndentFirstLine = true)
@@ -295,6 +299,12 @@ open class LoggingAgenticEventListener(
 
     protected open fun getActionExecutionResultMessage(e: ActionExecutionResultEvent): String =
         "[${e.processId}] executed action ${e.action.name} in ${e.actionStatus.runningTime}"
+
+    protected open fun getToolLoopStartMessage(e: ToolLoopStartEvent): String =
+        "[${e.processId}] (${e.action?.shortName()}) starting tool loop [${e.toolNames.joinToString(", ")}] max=${e.maxIterations}"
+
+    protected open fun getToolLoopCompletedMessage(e: ToolLoopCompletedEvent): String =
+        "[${e.processId}] (${e.action?.shortName()}) tool loop completed in ${e.runningTime.toMillis()}ms iterations=${e.totalIterations} replan=${e.replanRequested}"
 
     protected open fun getProgressUpdateEventMessage(e: ProgressUpdateEvent): String =
         "[${e.processId}] progress: ${e.createProgressBar(length = 50).color(LumonColorPalette.MEMBRANE)}"
@@ -412,6 +422,14 @@ open class LoggingAgenticEventListener(
                 logger.info(getActionExecutionResultMessage(event))
             }
 
+            is ToolLoopStartEvent -> {
+                logger.info(getToolLoopStartMessage(event))
+            }
+
+            is ToolLoopCompletedEvent -> {
+                logger.info(getToolLoopCompletedMessage(event))
+            }
+
             is ProgressUpdateEvent -> {
                 logger.info(getProgressUpdateEventMessage(event))
             }
@@ -430,14 +448,41 @@ open class LoggingAgenticEventListener(
         }
     }
 
+    private fun senderLabel(msg: org.springframework.ai.chat.messages.Message): String {
+        val name = msg.metadata["name"] as? String
+        return if (name != null) "${msg.messageType} ($name)" else "${msg.messageType}"
+    }
+
     fun Prompt.toInfoString(): String {
         val bannerChar = "."
-        return """|${lineSeparator("Messages ", bannerChar)}
-                  |${
-            instructions.joinToString("\n${lineSeparator("", bannerChar)}\n") {
-                "${it.messageType} <${it.text}>"
+        val formattedMessages = instructions.joinToString("\n") { msg ->
+            when (msg) {
+                is SpringAiAssistantMessage -> {
+                    val calls = msg.toolCalls.orEmpty()
+                    if (calls.isNotEmpty()) {
+                        val callSummary = calls.joinToString(", ") { tc ->
+                            "${tc.name()}(${trim(s = tc.arguments(), max = 80, keepRight = 10)})"
+                        }
+                        "${senderLabel(msg)} [tool calls: $callSummary]"
+                    } else {
+                        "${senderLabel(msg)} <${trim(s = msg.text ?: "", max = 200, keepRight = 20)}>"
+                    }
+                }
+                is ToolResponseMessage -> {
+                    val responses = msg.responses
+                    val respSummary = responses.joinToString(", ") { tr ->
+                        "${tr.name()}→${trim(s = tr.responseData(), max = 80, keepRight = 10)}"
+                    }
+                    "TOOL [$respSummary]"
+                }
+                else -> {
+                    val text = msg.text ?: ""
+                    "${senderLabel(msg)} <${text}>"
+                }
             }
         }
+        return """|${lineSeparator("Messages ", bannerChar)}
+                  |$formattedMessages
                   |${lineSeparator("Options", bannerChar)}
                   |$options
                   |"""

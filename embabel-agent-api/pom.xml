@@ -4,10 +4,10 @@
     <parent>
         <groupId>com.embabel.agent</groupId>
         <artifactId>embabel-agent-parent</artifactId>
-        <version>0.3.4-SNAPSHOT</version>
+        <version>0.3.5-SNAPSHOT</version>
     </parent>
     <artifactId>embabel-agent-api</artifactId>
-    <version>0.3.4-SNAPSHOT</version>
+    <version>0.3.5-SNAPSHOT</version>
     <packaging>jar</packaging>
     <name>Embabel Agent API</name>
     <description>Fluent DSL and Kotlin DSL for Agentic Flows</description>
@@ -27,12 +27,6 @@
     <dependencies>
 
         <dependency>
-            <groupId>org.springframework</groupId>
-            <artifactId>spring-webmvc</artifactId>
-            <optional>true</optional>
-        </dependency>
-
-        <dependency>
             <groupId>jakarta.servlet</groupId>
             <artifactId>jakarta.servlet-api</artifactId>
             <optional>true</optional>
@@ -40,7 +34,7 @@
 
         <dependency>
             <groupId>com.embabel.agent</groupId>
-            <artifactId>embabel-agent-common</artifactId>
+            <artifactId>embabel-agent-ai</artifactId>
         </dependency>
 
         <dependency>
@@ -139,6 +133,12 @@
         </dependency>
 
         <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-webmvc</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
             <groupId>org.mockito</groupId>
             <artifactId>mockito-core</artifactId>
             <scope>test</scope>
@@ -153,6 +153,13 @@
         <dependency>
             <groupId>com.tngtech.archunit</groupId>
             <artifactId>archunit-junit5</artifactId>
+            <scope>test</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.jetbrains.kotlin</groupId>
+            <artifactId>kotlin-metadata-jvm</artifactId>
+            <version>${kotlin.version}</version>
             <scope>test</scope>
         </dependency>
 
