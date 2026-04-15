@@ -20,6 +20,7 @@ import com.embabel.chat.AssistantMessage
 import com.embabel.chat.Conversation
 import com.embabel.chat.SystemMessage
 import com.embabel.chat.UserMessage
+import com.embabel.common.textio.template.TemplateRenderer
 
 /**
  * Implementation of [PromptRunner.Rendering] that delegates to a [PromptExecutionDelegate].
@@ -27,11 +28,13 @@ import com.embabel.chat.UserMessage
 internal data class DelegatingRendering(
     internal val delegate: PromptExecutionDelegate,
     internal val templateName: String,
+    private val templateRenderer: TemplateRenderer = delegate.templateRenderer,
 ) : PromptRunner.Rendering {
 
-    private val templateRenderer = delegate.templateRenderer
-
     private val compiledTemplate = templateRenderer.compileLoadedTemplate(templateName)
+
+    override fun withTemplateRenderer(templateRenderer: TemplateRenderer): PromptRunner.Rendering =
+        copy(templateRenderer = templateRenderer)
 
     override fun <T> createObject(
         outputClass: Class<T>,
@@ -64,6 +67,20 @@ internal data class DelegatingRendering(
                     content = compiledTemplate.render(model = model)
                 )
             ) + conversation.messages,
+            outputClass = String::class.java,
+        )
+        return AssistantMessage(response)
+    }
+
+    override fun respondWithTrigger(
+        conversation: Conversation,
+        triggerPrompt: String,
+        model: Map<String, Any>,
+    ): AssistantMessage {
+        val response = delegate.createObject(
+            messages = listOf(
+                SystemMessage(compiledTemplate.render(model = model))
+            ) + conversation.messages + listOf(UserMessage(triggerPrompt)),
             outputClass = String::class.java,
         )
         return AssistantMessage(response)

@@ -25,9 +25,11 @@ class GoogleGenAiModels {
 
     companion object {
 
-        // Gemini 3 Family (Preview - Latest Generation)
-        const val GEMINI_3_PRO_PREVIEW = "gemini-3-pro-preview"
+        // Gemini 3.1 Family (Preview - Latest Generation)
+        const val GEMINI_3_1_PRO_PREVIEW = "gemini-3.1-pro-preview"
         const val GEMINI_3_FLASH_PREVIEW = "gemini-3-flash-preview"
+        const val GEMINI_3_1_PRO_PREVIEW_CUSTOMTOOLS = "gemini-3.1-pro-preview-customtools"
+        const val GEMINI_3_1_FLASH_LITE_PREVIEW = "gemini-3.1-flash-lite-preview"
 
         // Gemini 2.5 Family (Stable - Current Generation)
         const val GEMINI_2_5_PRO = "gemini-2.5-pro"

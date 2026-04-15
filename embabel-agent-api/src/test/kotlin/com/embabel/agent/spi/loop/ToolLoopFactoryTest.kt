@@ -15,23 +15,18 @@
  */
 package com.embabel.agent.spi.loop
 
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.config.ToolLoopConfiguration
-import com.embabel.agent.api.tool.config.ToolLoopConfiguration.ParallelModeProperties
 import com.embabel.agent.api.tool.config.ToolLoopConfiguration.ToolLoopType
 import com.embabel.agent.spi.loop.support.DefaultToolLoop
 import com.embabel.agent.spi.loop.support.ParallelToolLoop
+import com.embabel.agent.spi.support.ExecutorAsyncer
 import com.fasterxml.jackson.databind.ObjectMapper
 import io.mockk.mockk
-import io.mockk.verify
-import org.junit.jupiter.api.Assertions.assertFalse
+import java.util.concurrent.Executors
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertTrue
-import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
-import java.io.Closeable
-import java.time.Duration
-import java.util.concurrent.ExecutorService
-import java.util.concurrent.Executors
 
 /**
  * Unit tests for [ToolLoopFactory].
@@ -41,10 +36,13 @@ class ToolLoopFactoryTest {
     private val mockMessageSender = mockk<LlmMessageSender>()
     private val objectMapper = ObjectMapper()
     private val injectionStrategy = ToolInjectionStrategy.NONE
+    private val asyncer = ExecutorAsyncer(Executors.newFixedThreadPool(4))
+    private val defaultPolicy = AutoCorrectionPolicy()
 
     @Test
-    fun `default factory creates DefaultToolLoop`() {
-        val factory = ToolLoopFactory.default()
+    fun `creates DefaultToolLoop for default type`() {
+        val config = ToolLoopConfiguration()
+        val factory = ToolLoopFactory.create(config, asyncer, defaultPolicy)
 
         val toolLoop = factory.create(
             llmMessageSender = mockMessageSender,
@@ -52,6 +50,9 @@ class ToolLoopFactoryTest {
             injectionStrategy = injectionStrategy,
             maxIterations = 20,
             toolDecorator = null,
+            inspectors = emptyList(),
+            transformers = emptyList(),
+            toolCallContext = ToolCallContext.EMPTY,
         )
 
         assertNotNull(toolLoop)
@@ -59,12 +60,32 @@ class ToolLoopFactoryTest {
     }
 
     @Test
-    fun `withConfig creates factory with custom configuration`() {
+    fun `creates ParallelToolLoop for parallel type`() {
+        val config = ToolLoopConfiguration(type = ToolLoopType.PARALLEL)
+        val factory = ToolLoopFactory.create(config, asyncer, defaultPolicy)
+
+        val toolLoop = factory.create(
+            llmMessageSender = mockMessageSender,
+            objectMapper = objectMapper,
+            injectionStrategy = injectionStrategy,
+            maxIterations = 20,
+            toolDecorator = null,
+            inspectors = emptyList(),
+            transformers = emptyList(),
+            toolCallContext = ToolCallContext.EMPTY,
+        )
+
+        assertNotNull(toolLoop)
+        assertTrue(toolLoop is ParallelToolLoop)
+    }
+
+    @Test
+    fun `custom configuration is respected`() {
         val config = ToolLoopConfiguration(
             type = ToolLoopType.DEFAULT,
             maxIterations = 10,
         )
-        val factory = ToolLoopFactory.withConfig(config)
+        val factory = ToolLoopFactory.create(config, asyncer, defaultPolicy)
 
         val toolLoop = factory.create(
             llmMessageSender = mockMessageSender,
@@ -72,110 +93,12 @@ class ToolLoopFactoryTest {
             injectionStrategy = injectionStrategy,
             maxIterations = 15,
             toolDecorator = null,
+            inspectors = emptyList(),
+            transformers = emptyList(),
+            toolCallContext = ToolCallContext.EMPTY,
         )
 
         assertNotNull(toolLoop)
         assertTrue(toolLoop is DefaultToolLoop)
-    }
-
-    @Test
-    fun `parallel type creates ParallelToolLoop`() {
-        val config = ToolLoopConfiguration(type = ToolLoopType.PARALLEL)
-        val factory = ToolLoopFactory.withConfig(config)
-
-        val toolLoop = factory.create(
-            llmMessageSender = mockMessageSender,
-            objectMapper = objectMapper,
-            injectionStrategy = injectionStrategy,
-            maxIterations = 20,
-            toolDecorator = null,
-        )
-
-        assertNotNull(toolLoop)
-        assertTrue(toolLoop is ParallelToolLoop)
-
-        // Cleanup
-        (factory as Closeable).close()
-    }
-
-    @Nested
-    inner class ExecutorShutdownTest {
-
-        @Test
-        fun `close shuts down created executor when parallel mode used`() {
-            val config = ToolLoopConfiguration(type = ToolLoopType.PARALLEL)
-            val factory = ToolLoopFactory.withConfig(config)
-
-            // Create parallel tool loop to initialize executor
-            factory.create(
-                llmMessageSender = mockMessageSender,
-                objectMapper = objectMapper,
-                injectionStrategy = injectionStrategy,
-                maxIterations = 20,
-                toolDecorator = null,
-            )
-
-            // Get executor via reflection before close
-            val lazyDelegateField = factory::class.java.getDeclaredField("lazyExecutorDelegate")
-            lazyDelegateField.isAccessible = true
-            val lazyDelegate = lazyDelegateField.get(factory) as Lazy<*>
-            val executor = lazyDelegate.value as ExecutorService
-
-            assertFalse(executor.isShutdown, "Executor should not be shut down before close")
-
-            // Close should shut down the executor
-            (factory as Closeable).close()
-
-            assertTrue(executor.isShutdown, "Executor should be shut down after close")
-        }
-
-        @Test
-        fun `close does not shut down external executor`() {
-            val externalExecutor = Executors.newSingleThreadExecutor()
-            try {
-                val config = ToolLoopConfiguration(type = ToolLoopType.PARALLEL)
-                val factory = ToolLoopFactory.withConfig(config, externalExecutor)
-
-                factory.create(
-                    llmMessageSender = mockMessageSender,
-                    objectMapper = objectMapper,
-                    injectionStrategy = injectionStrategy,
-                    maxIterations = 20,
-                    toolDecorator = null,
-                )
-
-                // Close factory
-                (factory as Closeable).close()
-
-                // External executor should still be usable
-                assertFalse(externalExecutor.isShutdown, "External executor should not be shut down")
-            } finally {
-                externalExecutor.shutdown()
-            }
-        }
-
-        @Test
-        fun `close is no-op when parallel mode never used`() {
-            val config = ToolLoopConfiguration(type = ToolLoopType.DEFAULT)
-            val factory = ToolLoopFactory.withConfig(config)
-
-            // Create default tool loop (no executor created)
-            factory.create(
-                llmMessageSender = mockMessageSender,
-                objectMapper = objectMapper,
-                injectionStrategy = injectionStrategy,
-                maxIterations = 20,
-                toolDecorator = null,
-            )
-
-            // Close should be no-op (no exception, no executor to check)
-            (factory as Closeable).close()
-        }
-
-        @Test
-        fun `factory implements Closeable`() {
-            val factory = ToolLoopFactory.default()
-            assertTrue(factory is Closeable)
-        }
     }
 }

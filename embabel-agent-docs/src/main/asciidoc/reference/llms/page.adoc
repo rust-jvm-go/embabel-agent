@@ -27,7 +27,14 @@ TIP: Trial and error is your friend.
 Embabel makes it easy to switch LLMs; try the cheapest thing that could work and switch if it doesn't.
 
 
+[[reference.llms.custom-integration]]
 ==== Advanced: Custom LLM Integration
+
+NOTE: If you want to use a standard provider (Anthropic, OpenAI, DeepSeek, Mistral) with a
+user-supplied key at runtime, see <<reference.customizing.byok>>.
+That is the recommended path for BYOK scenarios.
+This section covers implementing `LlmMessageSender` from scratch for providers not otherwise
+supported by Embabel.
 
 Embabel's tool loop is framework-agnostic, allowing you to integrate any LLM provider by implementing the `LlmMessageSender` interface.
 This is useful when:
@@ -78,6 +85,55 @@ embabel.agent.platform.toolloop.type=parallel
 ```
 
 For full list of tool loop configuration parameters please refer to `ToolLoopConfiguration`.
+
+===== Tool-Not-Found Recovery Policy
+
+When the LLM calls a tool by a name that doesn't exist in the available set, the behavior is controlled by `ToolNotFoundPolicy`.
+
+Two built-in policies are provided:
+
+- **`AutoCorrectionPolicy`** (default) — feeds the error back to the LLM so it can self-correct. Uses case-insensitive fuzzy matching to suggest corrections for hallucinated tool names (e.g., `ragbot_vectorSearch` → suggests `vectorSearch`). When multiple candidates match, all are listed. Throws `ToolNotFoundException` after 3 consecutive failures.
+- **`ImmediateThrowPolicy`** — throws `ToolNotFoundException` immediately.
+
+The system-wide default is `AutoCorrectionPolicy`, provided as a Spring bean with `@ConditionalOnMissingBean`.
+To override it globally, define your own `ToolNotFoundPolicy` bean.
+
+For per-interaction control, use `withToolNotFoundPolicy()` on `PromptRunner`:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+promptRunner
+    .withToolNotFoundPolicy(new AutoCorrectionPolicy(5))
+    .creating(MyOutput.class)
+    .create(messages);
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+promptRunner
+    .withToolNotFoundPolicy(AutoCorrectionPolicy(maxRetries = 5))
+    .creating(MyOutput::class.java)
+    .create(messages)
+----
+====
+
+Custom policies can be implemented by implementing the `ToolNotFoundPolicy` interface:
+
+[source,kotlin]
+----
+class MyEditDistancePolicy : ToolNotFoundPolicy {
+    override fun handle(requestedName: String, availableTools: List<Tool>): ToolNotFoundAction {
+        // Custom recovery logic, e.g. edit-distance matching
+        ...
+    }
+}
+----
 
 ===== Response Types
 
@@ -443,7 +499,14 @@ class MyLlmConfiguration {
 ====
 
 The bean will be automatically discovered and made available through the `ModelProvider`.
-You can then use it by name or role:
+
+===== How Model Discovery and Selection Works
+
+When your application starts, `ConfigurableModelProvider` collects all `LlmService` beans from the Spring application context.
+Your custom LLM is matched by the `name` property you set on your `LlmService` implementation.
+
+**By name**: Use the `name` from your `LlmService` directly.
+This works with `@LlmCall`, `ai.withLlm()`, and `AgenticTool.withLlm()`:
 
 [tabs]
 ====
@@ -451,28 +514,76 @@ Java::
 +
 [source,java]
 ----
-// By name
+// In a declarative action
 @LlmCall(llm = "my-custom-model")
 String myAction();
 
-// Or by role (if configured)
-@LlmCall(llm = "#best")
-String myAction();
+// In an imperative action
+ai.withLlm("my-custom-model")
+    .create("Tell me a joke", String.class);
 ----
 
 Kotlin::
 +
 [source,kotlin]
 ----
-// By name
+// In a declarative action
 @LlmCall(llm = "my-custom-model")
 fun myAction(): String
 
-// Or by role (if configured)
-@LlmCall(llm = "#best")
-fun myAction(): String
+// In an imperative action
+ai.withLlm("my-custom-model")
+    .create<String>("Tell me a joke")
 ----
 ====
+
+**By role**: Map a role name to your model name in configuration, then reference it with the `#` prefix:
+
+[source,yaml]
+----
+embabel:
+  models:
+    default-llm: my-custom-model  # <1>
+    llms:
+      best: my-custom-model       # <2>
+      cheapest: my-small-model    # <3>
+----
+<1> Sets the default LLM used when no explicit model is specified
+<2> Maps the `best` role to your custom model
+<3> Maps the `cheapest` role to a different model
+
+Then reference roles with `#`:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+// By role
+@LlmCall(llm = "#best")
+String myAction();
+
+// Or programmatically
+ai.withLlmByRole("best")
+    .create("Tell me a joke", String.class);
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+// By role
+@LlmCall(llm = "#best")
+fun myAction(): String
+
+// Or programmatically
+ai.withLlmByRole("best")
+    .create<String>("Tell me a joke")
+----
+====
+
+NOTE: If no LLM is specified in `@LlmCall` or `withLlm()`, the `default-llm` from configuration is used.
 
 ===== Using Your Custom Implementation (Alternative)
 
@@ -561,4 +672,217 @@ The `ToolLoopLlmOperations` base class provides several extension points:
    - `AssistantMessage`: LLM text response
    - `AssistantMessageWithToolCalls`: LLM response with tool requests
    - `ToolResultMessage`: Result returned to LLM after tool execution
+
+
+==== Advanced: Custom Embedding Service
+
+Just as you can integrate a custom LLM, you can implement a custom embedding service that doesn't depend on Spring AI.
+This is useful when:
+
+- You want to use an embedding provider not supported by Spring AI
+- You need custom pre/post-processing of embeddings
+- You're integrating with a proprietary or internal embedding API
+
+===== The EmbeddingService Interface
+
+The `EmbeddingService` interface is framework-agnostic.
+Unlike `SpringAiEmbeddingService`, a custom implementation does not need to wrap a Spring AI `EmbeddingModel`:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+public interface EmbeddingService {
+    float[] embed(String text);
+    List<float[]> embed(List<String> texts);
+    int getDimensions();
+    String getName();
+    String getProvider();
+}
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+interface EmbeddingService : EmbeddingServiceMetadata, HasInfoString {
+    fun embed(text: String): FloatArray
+    fun embed(texts: List<String>): List<FloatArray>
+    val dimensions: Int
+}
+----
+====
+
+===== Example: Custom Embedding Provider
+
+Here's an example of implementing `EmbeddingService` for an HTTP-based embedding API:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+public class MyCustomEmbeddingService implements EmbeddingService {
+
+    private final String name;
+    private final String provider;
+    private final int dimensions;
+    private final HttpClient httpClient;
+    private final String apiKey;
+
+    public MyCustomEmbeddingService(
+            String name,
+            String provider,
+            int dimensions,
+            HttpClient httpClient,
+            String apiKey) {
+        this.name = name;
+        this.provider = provider;
+        this.dimensions = dimensions;
+        this.httpClient = httpClient;
+        this.apiKey = apiKey;
+    }
+
+    @Override
+    public String getName() { return name; }
+
+    @Override
+    public String getProvider() { return provider; }
+
+    @Override
+    public int getDimensions() { return dimensions; }
+
+    @Override
+    public float[] embed(String text) {
+        return embed(List.of(text)).get(0);
+    }
+
+    @Override
+    public List<float[]> embed(List<String> texts) {
+        MyEmbeddingResponse response = httpClient
+            .post("https://api.my-embeddings.com/embed")
+            .header("Authorization", "Bearer " + apiKey)
+            .body(Map.of("texts", texts, "model", name))
+            .execute(MyEmbeddingResponse.class);
+        return response.getEmbeddings();
+    }
+}
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+class MyCustomEmbeddingService(
+    override val name: String,
+    override val provider: String,
+    override val dimensions: Int,
+    private val httpClient: HttpClient,
+    private val apiKey: String,
+) : EmbeddingService {
+
+    override fun embed(text: String): FloatArray =
+        embed(listOf(text)).first()
+
+    override fun embed(texts: List<String>): List<FloatArray> {
+        val response = httpClient.post("https://api.my-embeddings.com/embed") {
+            header("Authorization", "Bearer $apiKey")
+            body = mapOf("texts" to texts, "model" to name)
+        }
+        return response.body<MyEmbeddingResponse>().embeddings
+    }
+}
+----
+====
+
+===== Registering as a Spring Bean
+
+Register your custom embedding service as a Spring bean and it will be automatically discovered:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+@Configuration
+public class MyEmbeddingConfiguration {
+
+    @Bean
+    public EmbeddingService myCustomEmbeddings(
+            HttpClient httpClient,
+            @Value("${my-embeddings.api-key}") String apiKey) {
+        return new MyCustomEmbeddingService(
+            "my-custom-embeddings",
+            "MyProvider",
+            384,
+            httpClient,
+            apiKey
+        );
+    }
+}
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+@Configuration
+class MyEmbeddingConfiguration {
+
+    @Bean
+    fun myCustomEmbeddings(
+        httpClient: HttpClient,
+        @Value("\${my-embeddings.api-key}") apiKey: String,
+    ): EmbeddingService = MyCustomEmbeddingService(
+        name = "my-custom-embeddings",
+        provider = "MyProvider",
+        dimensions = 384,
+        httpClient = httpClient,
+        apiKey = apiKey,
+    )
+}
+----
+====
+
+===== Discovery and Selection
+
+Custom embedding services follow the same discovery and selection pattern as LLMs (see <<How Model Discovery and Selection Works>>).
+
+**By name**: Use `ai.withEmbeddingService()` with the `name` from your implementation:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+ai.withEmbeddingService("my-custom-embeddings")
+    .embed("Hello world");
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+ai.withEmbeddingService("my-custom-embeddings")
+    .embed("Hello world")
+----
+====
+
+**By role**: Map a role name to your embedding service in configuration:
+
+[source,yaml]
+----
+embabel:
+  models:
+    default-embedding-model: my-custom-embeddings  # <1>
+    embedding-services:
+      cheapest: my-custom-embeddings               # <2>
+----
+<1> Sets the default embedding service
+<2> Maps the `cheapest` role to your custom embedding service
 

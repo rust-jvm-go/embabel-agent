@@ -15,11 +15,19 @@
  */
 package com.embabel.agent.spi.loop.support
 
+import com.embabel.agent.api.common.TerminationScope
+import com.embabel.agent.api.tool.TerminateActionException
+import com.embabel.agent.core.support.AbstractAgentProcess
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolControlFlowSignal
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
+import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.BlackboardUpdater
 import com.embabel.agent.core.ReplanRequestedException
 import com.embabel.agent.core.Usage
+import com.embabel.agent.spi.loop.AutoCorrectionPolicy
 import com.embabel.agent.spi.loop.LlmMessageSender
 import com.embabel.agent.spi.loop.MaxIterationsExceededException
 import com.embabel.agent.spi.loop.ToolCallResult
@@ -27,7 +35,8 @@ import com.embabel.agent.spi.loop.ToolInjectionContext
 import com.embabel.agent.spi.loop.ToolInjectionStrategy
 import com.embabel.agent.spi.loop.ToolLoop
 import com.embabel.agent.spi.loop.ToolLoopResult
-import com.embabel.agent.spi.loop.ToolNotFoundException
+import com.embabel.agent.spi.loop.ToolNotFoundAction
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.chat.AssistantMessageWithToolCalls
 import com.embabel.chat.Message
 import com.embabel.chat.ToolCall
@@ -45,6 +54,8 @@ import org.slf4j.LoggerFactory
  * @param toolDecorator Optional decorator applied to tools when they are dynamically injected.
  * This ensures injected tools (e.g., from MatryoshkaTool) receive the same decoration
  * as initial tools, including event publication, observability, and error handling.
+ * @param inspectors Read-only observers for tool loop lifecycle events
+ * @param transformers Transformers for history compression, summarization, etc.
  */
 internal open class DefaultToolLoop(
     private val llmMessageSender: LlmMessageSender,
@@ -52,6 +63,10 @@ internal open class DefaultToolLoop(
     private val injectionStrategy: ToolInjectionStrategy = ToolInjectionStrategy.NONE,
     private val maxIterations: Int = 20,
     private val toolDecorator: ((Tool) -> Tool)? = null,
+    protected val inspectors: List<ToolLoopInspector> = emptyList(),
+    protected val transformers: List<ToolLoopTransformer> = emptyList(),
+    private val toolCallContext: ToolCallContext = ToolCallContext.EMPTY,
+    protected val toolNotFoundPolicy: ToolNotFoundPolicy = AutoCorrectionPolicy(),
 ) : ToolLoop {
 
     private val logger = LoggerFactory.getLogger(javaClass)
@@ -70,27 +85,101 @@ internal open class DefaultToolLoop(
             state.iterations++
             logger.debug("Tool loop iteration {} with {} available tools", state.iterations, state.availableTools.size)
 
+            /* -------------------------------------------------
+             * Apply beforeLlmCall callbacks - START
+             * ------------------------------------------------- */
+            val beforeContext = createBeforeLlmCallContext(
+                history = state.conversationHistory.toList(),
+                iteration = state.iterations,
+                tools = state.availableTools.toList(),
+            )
+            inspectors.notifyBeforeLlmCall(beforeContext)
+            val transformedHistory = transformers.applyBeforeLlmCall(beforeContext)
+            if (transformedHistory != state.conversationHistory) {
+                state.conversationHistory.clear()
+                state.conversationHistory.addAll(transformedHistory)
+            }
+            /* -------------------------------------------------
+             * Apply beforeLlmCall callbacks - END
+             * ------------------------------------------------- */
+
             val callResult = llmMessageSender.call(state.conversationHistory, state.availableTools)
             accumulateUsage(callResult.usage, state)
-            state.conversationHistory.add(callResult.message)
+
+            /* -------------------------------------------------
+             * Apply afterLlmCall callbacks - START
+             * ------------------------------------------------- */
+            val afterLlmContext = createAfterLlmCallContext(
+                history = state.conversationHistory.toList(),
+                iteration = state.iterations,
+                response = callResult.message,
+                usage = callResult.usage,
+            )
+            inspectors.notifyAfterLlmCall(afterLlmContext)
+            val transformedResponse = transformers.applyAfterLlmCall(afterLlmContext)
+            /* -------------------------------------------------
+             * Apply afterLlmCall callbacks - END
+             * ------------------------------------------------- */
+
+            state.conversationHistory.add(transformedResponse)
 
             logger.debug(
                 "ToolLoop returned. Passed messages:\n{}\nResult: {}",
                 state.conversationHistory.joinToString("\n") { "\t" + it },
-                callResult.message,
+                transformedResponse,
             )
 
-            if (!hasToolCalls(callResult.message)) {
+            if (!hasToolCalls(transformedResponse)) {
+                /* -------------------------------------------------
+                 * Apply afterIteration callbacks for early exit - START
+                 * LLM returned final answer without tool calls.
+                 * Call afterIteration with empty toolCalls for consistency,
+                 * allowing inspectors to observe loop completion and
+                 * transformers to perform final history cleanup.
+                 * ------------------------------------------------- */
+                val earlyExitContext = createAfterIterationContext(
+                    history = state.conversationHistory.toList(),
+                    iteration = state.iterations,
+                    toolCallsInIteration = emptyList(),
+                )
+                inspectors.notifyAfterIteration(earlyExitContext)
+                val historyAfterEarlyExit = transformers.applyAfterIteration(earlyExitContext)
+                if (historyAfterEarlyExit != state.conversationHistory) {
+                    state.conversationHistory.clear()
+                    state.conversationHistory.addAll(historyAfterEarlyExit)
+                }
+                /* -------------------------------------------------
+                 * Apply afterIteration callbacks for early exit - END
+                 * ------------------------------------------------- */
+
                 logCompletion(state.iterations)
-                return buildResult(callResult.textContent, outputParser, state)
+                return buildResult(transformedResponse.content, outputParser, state)
             }
 
-            val assistantMessage = callResult.message as AssistantMessageWithToolCalls
+            val assistantMessage = transformedResponse as AssistantMessageWithToolCalls
             val shouldContinue = processToolCalls(assistantMessage.toolCalls, state)
             if (!shouldContinue) {
                 logger.info("Tool loop terminated for replan after {} iterations", state.iterations)
                 return buildResult("", outputParser, state)
             }
+
+            /* -------------------------------------------------
+             * Apply afterIteration callbacks - START
+             * ------------------------------------------------- */
+            val afterIterContext = createAfterIterationContext(
+                history = state.conversationHistory.toList(),
+                iteration = state.iterations,
+                toolCallsInIteration = assistantMessage.toolCalls,
+            )
+            inspectors.notifyAfterIteration(afterIterContext)
+            val historyAfterIteration = transformers.applyAfterIteration(afterIterContext)
+            if (historyAfterIteration != state.conversationHistory) {
+                state.conversationHistory.clear()
+                state.conversationHistory.addAll(historyAfterIteration)
+            }
+            /* -------------------------------------------------
+             * Apply afterIteration callbacks - END
+             * ------------------------------------------------- */
         }
 
         throw MaxIterationsExceededException(maxIterations)
@@ -120,6 +209,7 @@ internal open class DefaultToolLoop(
         state: LoopState,
     ): ToolLoopResult<O> = ToolLoopResult(
         result = outputParser(finalText),
+        rawResponseText = finalText,
         conversationHistory = state.conversationHistory,
         totalIterations = state.iterations,
         injectedTools = state.injectedTools,
@@ -143,10 +233,28 @@ internal open class DefaultToolLoop(
         state: LoopState,
     ): Boolean {
         for (toolCall in toolCalls) {
+            checkForActionTerminationSignal()
             val shouldContinue = processToolCall(toolCall, state)
             if (!shouldContinue) return false
         }
+        // Check for signal set by last tool or its transformers
+        checkForActionTerminationSignal()
         return true
+    }
+
+    /**
+     * Check for graceful action termination signal.
+     * Converts graceful signal to immediate termination via exception.
+     * Clears the signal before throwing to allow action retry.
+     */
+    protected fun checkForActionTerminationSignal() {
+        val process = AgentProcess.get() as? AbstractAgentProcess ?: return
+        val signal = process.terminationRequest
+        if (signal != null && signal.scope == TerminationScope.ACTION) {
+            logger.info("Action termination signal detected: {}", signal.reason)
+            process.resetTerminationRequest()
+            throw TerminateActionException(signal.reason)
+        }
     }
 
     /**
@@ -157,12 +265,14 @@ internal open class DefaultToolLoop(
         state: LoopState,
     ): Boolean {
         val tool = findTool(state.availableTools, toolCall.name)
-            ?: throw ToolNotFoundException(toolCall.name, state.availableTools.map { it.definition.name })
+            ?: return applyToolNotFoundPolicy(toolCall, state)
+
+        toolNotFoundPolicy.onToolFound()
 
         return try {
-            val resultContent = executeToolCall(tool, toolCall)
+            val (result, resultContent) = executeToolCall(tool, toolCall)
             applyInjectionStrategy(toolCall, resultContent, state)
-            addToolResultToHistory(toolCall, resultContent, state)
+            addToolResultToHistory(toolCall, result, resultContent, state)
             true
         } catch (e: ReplanRequestedException) {
             logger.info("Tool '{}' requested replan: {}", toolCall.name, e.reason)
@@ -182,13 +292,15 @@ internal open class DefaultToolLoop(
     protected fun executeToolCall(
         tool: Tool,
         toolCall: ToolCall,
-    ): String {
+    ): Pair<Tool.Result, String> {
         logger.debug("Executing tool: {} with input: {}", toolCall.name, toolCall.arguments)
-        return when (val toolResult = tool.call(toolCall.arguments)) {
-            is Tool.Result.Text -> toolResult.content
-            is Tool.Result.WithArtifact -> toolResult.content
-            is Tool.Result.Error -> "Error: ${toolResult.message}"
+        val result = tool.call(toolCall.arguments, toolCallContext)
+        val content = when (result) {
+            is Tool.Result.Text -> result.content
+            is Tool.Result.WithArtifact -> result.content
+            is Tool.Result.Error -> "Error: ${result.message}"
         }
+        return result to content
     }
 
     protected fun applyInjectionStrategy(
@@ -262,14 +374,31 @@ internal open class DefaultToolLoop(
 
     protected fun addToolResultToHistory(
         toolCall: ToolCall,
+        result: Tool.Result,
         resultContent: String,
         state: LoopState,
     ) {
+        /* -------------------------------------------------
+         * Apply afterToolResult callbacks - START
+         * ------------------------------------------------- */
+        val afterToolContext = createAfterToolResultContext(
+            history = state.conversationHistory.toList(),
+            iteration = state.iterations,
+            toolCall = toolCall,
+            result = result,
+            resultAsString = resultContent,
+        )
+        inspectors.notifyAfterToolResult(afterToolContext)
+        val transformedResult = transformers.applyAfterToolResult(afterToolContext)
+        /* -------------------------------------------------
+         * Apply afterToolResult callbacks - END
+         * ------------------------------------------------- */
+
         state.conversationHistory.add(
             ToolResultMessage(
                 toolCallId = toolCall.id,
                 toolName = toolCall.name,
-                content = resultContent,
+                content = transformedResult,
             )
         )
     }
@@ -291,6 +420,23 @@ internal open class DefaultToolLoop(
      */
     protected fun findTool(tools: List<Tool>, name: String): Tool? {
         return tools.find { it.definition.name == name }
+    }
+
+    private fun applyToolNotFoundPolicy(toolCall: ToolCall, state: LoopState): Boolean {
+        return when (val action = toolNotFoundPolicy.handle(toolCall.name, state.availableTools)) {
+            is ToolNotFoundAction.Throw -> throw action.exception
+            is ToolNotFoundAction.FeedbackToModel -> {
+                logger.warn(action.message)
+                state.conversationHistory.add(
+                    ToolResultMessage(
+                        toolCallId = toolCall.id,
+                        toolName = toolCall.name,
+                        content = action.message,
+                    )
+                )
+                true
+            }
+        }
     }
 
     /**

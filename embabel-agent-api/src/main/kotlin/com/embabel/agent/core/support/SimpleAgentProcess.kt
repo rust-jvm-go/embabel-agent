@@ -19,7 +19,10 @@ import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.event.AgentProcessPlanFormulatedEvent
 import com.embabel.agent.api.event.GoalAchievedEvent
 import com.embabel.agent.api.event.ReplanRequestedEvent
+import com.embabel.agent.api.tool.TerminateActionException
+import com.embabel.agent.api.tool.TerminateAgentException
 import com.embabel.agent.api.tool.ToolControlFlowSignal
+import com.embabel.agent.core.Action
 import com.embabel.agent.core.Agent
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.AgentProcessStatusCode
@@ -66,7 +69,7 @@ open class SimpleAgentProcess(
      * would be the only applicable action again.
      * Cleared after each successful planning cycle.
      */
-    private val replanBlacklist = mutableSetOf<String>()
+    protected val replanBlacklist = mutableSetOf<String>()
 
     protected fun handlePlanNotFound(worldState: WorldState): AgentProcess {
         logger.debug(
@@ -154,34 +157,29 @@ open class SimpleAgentProcess(
         } else {
             sendProcessRunningEvent(plan, worldState)
 
-            val action = agent.actions.singleOrNull { it.name == plan.actions.first().name }
-                ?: error(
-                    "No unique action found for ${plan.actions.first().name} in ${agent.actions.map { it.name }}: Actions are\n${
-                        agent.actions.joinToString(
-                            "\n"
-                        ) { it.name }
-                    }")
+            val action = resolveActionFromPlan(plan)
             try {
                 val actionStatus = executeAction(action)
                 setStatus(actionStatusToAgentProcessStatus(actionStatus))
             } catch (rpe: ReplanRequestedException) {
-                // Apply blackboard updates from the replan request
-                rpe.blackboardUpdater.accept(blackboard)
-                // Blacklist this action for the next planning cycle to prevent infinite loops
-                replanBlacklist.add(action.name)
+                handleReplanRequest(action, rpe)
+            } catch (e: TerminateActionException) {
+                // Action requested early termination - continue with next action
                 logger.info(
-                    "Action {} requested replan: {}. Blacklisted for next cycle.",
+                    "Action {} terminated early: {}",
                     action.name,
-                    rpe.reason,
+                    e.reason,
                 )
-                platformServices.eventListener.onProcessEvent(
-                    ReplanRequestedEvent(
-                        agentProcess = this,
-                        reason = rpe.reason,
-                    )
-                )
-                // Keep status as RUNNING to trigger replanning on next tick
+                // Keep status as RUNNING to continue with next action
                 setStatus(AgentProcessStatusCode.RUNNING)
+            } catch (e: TerminateAgentException) {
+                // Agent termination requested - stop the entire process
+                logger.info(
+                    "Agent process terminated by action {}: {}",
+                    action.name,
+                    e.reason,
+                )
+                setStatus(AgentProcessStatusCode.TERMINATED)
             } catch (e: Exception) {
                 if (e is ToolControlFlowSignal) {
                     // Other control flow signals (e.g., UserInputRequiredException) must propagate
@@ -191,5 +189,38 @@ open class SimpleAgentProcess(
             }
         }
         return this
+    }
+
+    private fun resolveActionFromPlan(plan: Plan): com.embabel.agent.core.Action =
+        agent.actions.singleOrNull { it.name == plan.actions.first().name }
+            ?: error(
+                "No unique action found for ${plan.actions.first().name} in ${agent.actions.map { it.name }}"
+            )
+
+    /**
+     * Handles a [ReplanRequestedException] thrown by an action.
+     *
+     * Shared by [SimpleAgentProcess] and [ConcurrentAgentProcess] to keep replan semantics
+     * consistent across both execution modes:
+     * 1. Applies the blackboard updates supplied by the throwing action.
+     * 2. Blacklists the action for the next planning cycle to prevent an immediate infinite loop.
+     * 3. Emits a [ReplanRequestedEvent].
+     * 4. Keeps the process status as [AgentProcessStatusCode.RUNNING] so the main loop replans.
+     */
+    protected fun handleReplanRequest(action: Action, rpe: ReplanRequestedException) {
+        rpe.blackboardUpdater.accept(blackboard)
+        replanBlacklist.add(action.name)
+        logger.info(
+            "Action {} requested replan: {}. Blacklisted for next cycle.",
+            action.name,
+            rpe.reason,
+        )
+        platformServices.eventListener.onProcessEvent(
+            ReplanRequestedEvent(
+                agentProcess = this,
+                reason = rpe.reason,
+            )
+        )
+        setStatus(AgentProcessStatusCode.RUNNING)
     }
 }

@@ -21,13 +21,14 @@ import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.Blackboard
 import com.embabel.agent.core.ProcessContext
+import com.embabel.agent.core.ProcessOptions
 import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.InvalidLlmReturnFormatException
 import com.embabel.agent.core.support.InvalidLlmReturnTypeException
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetToolsFrom
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
-import com.embabel.agent.spi.support.springai.MaybeReturn
+import com.embabel.agent.spi.support.MaybeReturn
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator
 import com.embabel.agent.support.SimpleTestAgent
@@ -58,6 +59,8 @@ import org.springframework.ai.chat.prompt.DefaultChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.model.tool.ToolCallingChatOptions
 import java.time.LocalDate
+import java.util.concurrent.Executors
+import java.util.function.Predicate
 import kotlin.test.assertEquals
 
 /**
@@ -126,6 +129,7 @@ class ChatClientLlmOperationsTest {
             emptyList()
         )
         every { mockProcessContext.platformServices.eventListener } returns ese
+        every { mockProcessContext.processOptions } returns ProcessOptions()
         val mockAgentProcess = mockk<AgentProcess>()
         every { mockAgentProcess.recordLlmInvocation(any()) } answers {
             mutableLlmInvocationHistory.invocations.add(firstArg())
@@ -152,6 +156,7 @@ class ChatClientLlmOperationsTest {
             templateRenderer = JinjavaTemplateRenderer(),
             objectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
             dataBindingProperties = dataBindingProperties,
+            asyncer = ExecutorAsyncer(Executors.newCachedThreadPool()),
         )
         return Setup(cco, mockAgentProcess, mutableLlmInvocationHistory)
     }
@@ -617,42 +622,7 @@ class ChatClientLlmOperationsTest {
         }
 
         @Test
-        fun `Spring AI path should timeout when LLM call exceeds timeout`() {
-            // LLM takes 2000ms, but timeout is 200ms - should definitely timeout
-            val duke = Dog("Duke")
-            val delayingChatModel = DelayingFakeChatModel(
-                response = jacksonObjectMapper().writeValueAsString(duke),
-                delayMillis = 2000,
-            )
-
-            val setup = createChatClientLlmOperationsWithDelayingModel(delayingChatModel)
-
-            // Spring AI path (useEmbabelToolLoop=false) has timeout - should fail
-            val exception = assertThrows(RuntimeException::class.java) {
-                setup.llmOperations.createObject(
-                    messages = listOf(UserMessage("Give me a dog")),
-                    interaction = LlmInteraction(
-                        id = InteractionId("timeout-test-springai"),
-                        llm = LlmOptions().withTimeout(java.time.Duration.ofMillis(200)),
-                        useEmbabelToolLoop = false,
-                    ),
-                    outputClass = Dog::class.java,
-                    action = SimpleTestAgent.actions.first(),
-                    agentProcess = setup.mockAgentProcess,
-                )
-            }
-
-            assertTrue(
-                exception.message?.contains("timed out") == true ||
-                        exception.cause is java.util.concurrent.TimeoutException,
-                "Should have timed out, but got: ${exception.message}"
-            )
-        }
-
-        @Test
-        fun `Embabel tool loop path should timeout when LLM call exceeds timeout`() {
-            // LLM takes 500ms, but timeout is 100ms - should timeout
-            // THIS TEST CURRENTLY FAILS because Embabel tool loop has no timeout!
+        fun `should timeout when LLM call exceeds timeout`() {
             val duke = Dog("Duke")
             val delayingChatModel = DelayingFakeChatModel(
                 response = jacksonObjectMapper().writeValueAsString(duke),
@@ -661,14 +631,12 @@ class ChatClientLlmOperationsTest {
 
             val setup = createChatClientLlmOperationsWithDelayingModel(delayingChatModel)
 
-            // Embabel tool loop path (useEmbabelToolLoop=true) should also timeout
             val exception = assertThrows(RuntimeException::class.java) {
                 setup.llmOperations.createObject(
                     messages = listOf(UserMessage("Give me a dog")),
                     interaction = LlmInteraction(
-                        id = InteractionId("timeout-test-embabel"),
+                        id = InteractionId("timeout-test"),
                         llm = LlmOptions().withTimeout(java.time.Duration.ofMillis(100)),
-                        useEmbabelToolLoop = true,
                     ),
                     outputClass = Dog::class.java,
                     action = SimpleTestAgent.actions.first(),
@@ -696,6 +664,7 @@ class ChatClientLlmOperationsTest {
                 emptyList()
             )
             every { mockProcessContext.platformServices.eventListener } returns ese
+            every { mockProcessContext.processOptions } returns ProcessOptions()
             val mockAgentProcess = mockk<AgentProcess>()
             every { mockAgentProcess.recordLlmInvocation(any()) } answers {
                 mutableLlmInvocationHistory.invocations.add(firstArg())
@@ -726,6 +695,7 @@ class ChatClientLlmOperationsTest {
                 objectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
                 dataBindingProperties = LlmDataBindingProperties(maxAttempts = 1),  // No retries for timeout tests
                 llmOperationsPromptsProperties = promptsProperties,
+                asyncer = ExecutorAsyncer(Executors.newCachedThreadPool()),
             )
             return Setup(cco, mockAgentProcess, mutableLlmInvocationHistory)
         }
@@ -735,10 +705,7 @@ class ChatClientLlmOperationsTest {
     inner class RetryOnInvalidJson {
 
         @Test
-        fun `should retry on invalid JSON and succeed with Embabel tool loop`() {
-            // This test demonstrates the bug: when useEmbabelToolLoop=true (default),
-            // InvalidLlmReturnFormatException is NOT retried, causing the operation to fail
-            // even when a subsequent attempt would succeed.
+        fun `should retry on invalid JSON and succeed`() {
             val duke = Dog("Duke")
 
             // First response is invalid JSON, second is valid
@@ -754,49 +721,11 @@ class ChatClientLlmOperationsTest {
                 LlmDataBindingProperties(maxAttempts = 3)
             )
 
-            // With useEmbabelToolLoop=true (default), this should retry and succeed
-            // Currently it fails because the Embabel tool loop path has no retry wrapper
             val result = setup.llmOperations.createObject(
                 messages = listOf(UserMessage("Give me a dog")),
                 interaction = LlmInteraction(
                     id = InteractionId("retry-test"),
                     llm = LlmOptions(),
-                    useEmbabelToolLoop = true,  // This is the default, making it explicit
-                ),
-                outputClass = Dog::class.java,
-                action = SimpleTestAgent.actions.first(),
-                agentProcess = setup.mockAgentProcess,
-            )
-
-            assertEquals(duke, result, "Should have retried and got valid response")
-            assertEquals(2, fakeChatModel.promptsPassed.size, "Should have made 2 attempts")
-        }
-
-        @Test
-        fun `should retry on invalid JSON and succeed with Spring AI tool loop`() {
-            // This test shows the Spring AI path DOES have retry logic
-            val duke = Dog("Duke")
-
-            // First response is invalid JSON, second is valid
-            val fakeChatModel = FakeChatModel(
-                responses = listOf(
-                    "This ain't no JSON - malformed response",
-                    jacksonObjectMapper().writeValueAsString(duke)
-                )
-            )
-
-            val setup = createChatClientLlmOperations(
-                fakeChatModel,
-                LlmDataBindingProperties(maxAttempts = 3)
-            )
-
-            // With useEmbabelToolLoop=false, this uses Spring AI's path which has retry
-            val result = setup.llmOperations.createObject(
-                messages = listOf(UserMessage("Give me a dog")),
-                interaction = LlmInteraction(
-                    id = InteractionId("retry-test-springai"),
-                    llm = LlmOptions(),
-                    useEmbabelToolLoop = false,  // Use Spring AI path which has retry
                 ),
                 outputClass = Dog::class.java,
                 action = SimpleTestAgent.actions.first(),
@@ -997,6 +926,88 @@ class ChatClientLlmOperationsTest {
                     fail<Unit>("System message found after non-system message - violates message ordering")
                 }
             }
+        }
+    }
+
+    @Nested
+    inner class ApiErrorHandling {
+
+        /**
+         * ChatModel that throws RuntimeException simulating an API key
+         * that lacks access to the configured model (401/403 from OpenAI).
+         */
+        inner class ErrorThrowingChatModel(
+            private val exception: RuntimeException = RuntimeException("401 Unauthorized: Invalid API key")
+        ) : ChatModel {
+            override fun getDefaultOptions(): ChatOptions = DefaultChatOptions()
+            override fun call(prompt: Prompt): ChatResponse = throw exception
+        }
+
+        @Test
+        fun `throws RuntimeException with message when API key is invalid`() {
+            val errorModel = ErrorThrowingChatModel()
+
+            val setup = createChatClientLlmOperations(
+                FakeChatModel("unused").also {
+                    // We need to set up the infrastructure but use our own model
+                },
+                LlmDataBindingProperties(maxAttempts = 1),
+            )
+
+            // Replace the model provider to use our error-throwing model
+            val ese = EventSavingAgenticEventListener()
+            val mutableLlmInvocationHistory = MutableLlmInvocationHistory()
+            val mockProcessContext = mockk<ProcessContext>()
+            every { mockProcessContext.platformServices } returns mockk()
+            every { mockProcessContext.platformServices.agentPlatform } returns mockk()
+            every { mockProcessContext.platformServices.agentPlatform.toolGroupResolver } returns RegistryToolGroupResolver(
+                "mt",
+                emptyList()
+            )
+            every { mockProcessContext.platformServices.eventListener } returns ese
+            every { mockProcessContext.processOptions } returns ProcessOptions()
+            val mockAgentProcess = mockk<AgentProcess>()
+            every { mockAgentProcess.recordLlmInvocation(any()) } answers {
+                mutableLlmInvocationHistory.invocations.add(firstArg())
+            }
+            every { mockProcessContext.onProcessEvent(any()) } answers { ese.onProcessEvent(firstArg()) }
+            every { mockProcessContext.agentProcess } returns mockAgentProcess
+            every { mockAgentProcess.agent } returns SimpleTestAgent
+            every { mockAgentProcess.processContext } returns mockProcessContext
+            val blackboard = mockk<Blackboard>(relaxed = true)
+            every { mockAgentProcess.blackboard } returns blackboard
+
+            val mockModelProvider = mockk<ModelProvider>()
+            val crit = slot<ModelSelectionCriteria>()
+            val fakeLlm = SpringAiLlmService("fake", "provider", errorModel, DefaultOptionsConverter)
+            every { mockModelProvider.getLlm(capture(crit)) } returns fakeLlm
+            val cco = ChatClientLlmOperations(
+                modelProvider = mockModelProvider,
+                toolDecorator = DefaultToolDecorator(),
+                validator = Validation.buildDefaultValidatorFactory().validator,
+                validationPromptGenerator = DefaultValidationPromptGenerator(),
+                templateRenderer = JinjavaTemplateRenderer(),
+                objectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
+                dataBindingProperties = LlmDataBindingProperties(maxAttempts = 1),
+                asyncer = ExecutorAsyncer(Executors.newCachedThreadPool()),
+            )
+
+            val exception = assertThrows(RuntimeException::class.java) {
+                cco.doTransform(
+                    messages = listOf(UserMessage("prompt")),
+                    interaction = LlmInteraction(
+                        id = InteractionId("api-error-test"),
+                        llm = LlmOptions(),
+                    ),
+                    outputClass = String::class.java,
+                    llmRequestEvent = null,
+                )
+            }
+            // Should get a RuntimeException, not an NPE
+            assertFalse(
+                exception is NullPointerException,
+                "Should not be NullPointerException, but got: ${exception::class.simpleName}"
+            )
         }
     }
 
@@ -1253,6 +1264,65 @@ class ChatClientLlmOperationsTest {
                 agentProcess = setup.mockAgentProcess,
             )
             assertEquals(invalidHusky, createdDog, "Invalid response should have been corrected")
+        }
+
+        @Test
+        fun `field filter suppresses constraint violation for excluded field`() {
+            data class BorderCollie(
+                val name: String,
+                @field:Pattern(regexp = "^mince$", message = "eats field must be 'mince'")
+                val eats: String,
+            )
+
+            val invalidHusky = BorderCollie("Husky", eats = "kibble")
+            val fakeChatModel = FakeChatModel(jacksonObjectMapper().writeValueAsString(invalidHusky))
+            val setup = createChatClientLlmOperations(fakeChatModel)
+
+            // Exclude 'eats' from the field filter — its constraint violation should be ignored
+            val result = setup.llmOperations.createObject(
+                messages = listOf(UserMessage("prompt")),
+                interaction = LlmInteraction(
+                    id = InteractionId("id"),
+                    llm = LlmOptions(),
+                    fieldFilter = Predicate { field -> field.name != "eats" },
+                ),
+                outputClass = BorderCollie::class.java,
+                action = SimpleTestAgent.actions.first(),
+                agentProcess = setup.mockAgentProcess,
+            )
+
+            assertEquals(invalidHusky, result, "Filtered-out field violation should not block the result")
+        }
+
+        @Test
+        fun `field filter does not suppress constraint violation for included field`() {
+            data class BorderCollie(
+                val name: String,
+                @field:Pattern(regexp = "^mince$", message = "eats field must be 'mince'")
+                val eats: String,
+            )
+
+            val invalidHusky = BorderCollie("Husky", eats = "kibble")
+            val fakeChatModel = FakeChatModel(jacksonObjectMapper().writeValueAsString(invalidHusky))
+            val setup = createChatClientLlmOperations(fakeChatModel)
+
+            // 'eats' is still included in the filter — violation should be raised
+            try {
+                setup.llmOperations.createObject(
+                    messages = listOf(UserMessage("prompt")),
+                    interaction = LlmInteraction(
+                        id = InteractionId("id"),
+                        llm = LlmOptions(),
+                        fieldFilter = Predicate { true },
+                    ),
+                    outputClass = BorderCollie::class.java,
+                    action = SimpleTestAgent.actions.first(),
+                    agentProcess = setup.mockAgentProcess,
+                )
+                fail("Should have thrown InvalidLlmReturnTypeException")
+            } catch (e: InvalidLlmReturnTypeException) {
+                assertTrue(e.constraintViolations.any { it.propertyPath.toString() == "eats" })
+            }
         }
     }
 

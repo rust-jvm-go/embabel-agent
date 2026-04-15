@@ -38,7 +38,8 @@ import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
-import org.springframework.http.client.ClientHttpRequestFactory
+import org.springframework.web.client.RestClient
+import org.springframework.web.reactive.function.client.WebClient
 
 /**
  * Configuration properties for OpenAI model settings.
@@ -106,11 +107,14 @@ class OpenAiModelsConfig(
     @param:Value("\${OPENAI_EMBEDDINGS_PATH:#{null}}")
     private val envEmbeddingsPath: String?,
     observationRegistry: ObjectProvider<ObservationRegistry>,
-    @Qualifier("aiModelHttpRequestFactory") requestFactory: ObjectProvider<ClientHttpRequestFactory>,
+    @Qualifier("aiModelRestClientBuilder")
+    restClientBuilder: ObjectProvider<RestClient.Builder>,
     private val properties: OpenAiProperties,
-    private val llmOptionsProperties: LlmOptionsProperties,
+    llmOptionsProperties: LlmOptionsProperties,
     private val configurableBeanFactory: ConfigurableBeanFactory,
     private val modelLoader: LlmAutoConfigMetadataLoader<OpenAiModelDefinitions> = OpenAiModelLoader(),
+    @Qualifier("aiModelWebClientBuilder")
+    webClientBuilder: ObjectProvider<WebClient.Builder>,
 ) : OpenAiCompatibleModelFactory(
     baseUrl = envBaseUrl ?: properties.baseUrl,
     apiKey = envApiKey ?: properties.apiKey
@@ -119,7 +123,8 @@ class OpenAiModelsConfig(
     embeddingsPath = envEmbeddingsPath ?: properties.embeddingsPath,
     httpHeaders = llmOptionsProperties.httpHeaders,
     observationRegistry = observationRegistry.getIfUnique { ObservationRegistry.NOOP },
-    requestFactory = requestFactory,
+    restClientBuilder = restClientBuilder,
+    webClientBuilder = webClientBuilder,
 ) {
 
     init {
@@ -217,6 +222,7 @@ class OpenAiModelsConfig(
         return openAiCompatibleEmbeddingService(
             model = embeddingDef.modelId,
             provider = OpenAiModels.PROVIDER,
+            configuredDimensions = embeddingDef.dimensions,
         )
     }
 }

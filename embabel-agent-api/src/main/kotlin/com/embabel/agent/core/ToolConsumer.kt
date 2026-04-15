@@ -15,8 +15,12 @@
  */
 package com.embabel.agent.core
 
+import com.embabel.agent.api.common.TerminationScope
+import com.embabel.agent.api.tool.TerminateActionException
+import com.embabel.agent.api.tool.TerminateAgentException
 import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.spi.ToolGroupResolver
+import com.embabel.agent.spi.loop.RequiredToolGroupException
 import com.embabel.common.util.loggerFor
 
 /**
@@ -83,23 +87,43 @@ interface ToolConsumer : ToolSpecConsumer,
         ): List<Tool> {
             val resolvedTools = mutableListOf<Tool>()
             resolvedTools += toolConsumer.tools
-            for (role in toolConsumer.toolGroups) {
-                val resolution = toolGroupResolver.resolveToolGroup(role)
+            for (requirement in toolConsumer.toolGroups) {
+                val resolution = toolGroupResolver.resolveToolGroup(requirement)
                 if (resolution.resolvedToolGroup == null) {
+                    if (requirement.requiredToolNames.isNotEmpty()) {
+                        throwForMissingTools(
+                            requirement,
+                            "Required tool group with role='${requirement.role}' could not be resolved: ${resolution.failureMessage}",
+                        )
+                    }
                     loggerFor<ToolConsumer>().warn(
                         "Could not resolve tool group with role='{}': {}\n{}",
-                        role,
+                        requirement.role,
                         resolution.failureMessage,
                         NO_TOOLS_WARNING,
                     )
                 } else if (resolution.resolvedToolGroup.tools.isEmpty()) {
+                    if (requirement.requiredToolNames.isNotEmpty()) {
+                        throwForMissingTools(
+                            requirement,
+                            "Required tool group with role='${requirement.role}' has no tools; required: ${requirement.requiredToolNames}",
+                        )
+                    }
                     loggerFor<ToolConsumer>().warn(
                         "No tools found for tool group with role='{}': {}\n{}",
-                        role,
+                        requirement.role,
                         resolution.failureMessage,
                         NO_TOOLS_WARNING,
                     )
                 } else {
+                    val resolvedToolNames = resolution.resolvedToolGroup.tools.map { it.definition.name }.toSet()
+                    val missingToolNames = requirement.requiredToolNames - resolvedToolNames
+                    if (missingToolNames.isNotEmpty()) {
+                        throwForMissingTools(
+                            requirement,
+                            "Tool group with role='${requirement.role}' is missing required tools: $missingToolNames. Available: $resolvedToolNames",
+                        )
+                    }
                     resolvedTools += resolution.resolvedToolGroup.tools
                 }
             }
@@ -113,6 +137,17 @@ interface ToolConsumer : ToolSpecConsumer,
             )
             return resolvedTools.distinctBy { it.definition.name }.sortedBy { it.definition.name }
         }
+    }
+}
+
+private fun throwForMissingTools(
+    requirement: ToolGroupRequirement,
+    message: String,
+): Nothing {
+    when (requirement.terminationScope) {
+        TerminationScope.AGENT -> throw TerminateAgentException(message)
+        TerminationScope.ACTION -> throw TerminateActionException(message)
+        null -> throw RequiredToolGroupException(role = requirement.role, message = message)
     }
 }
 

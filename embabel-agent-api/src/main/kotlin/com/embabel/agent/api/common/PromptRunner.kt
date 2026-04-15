@@ -18,23 +18,31 @@ package com.embabel.agent.api.common
 import com.embabel.agent.api.common.PromptRunner.Creating
 import com.embabel.agent.api.reference.LlmReference
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.tool.agentic.ToolChaining
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
 import com.embabel.agent.api.validation.guardrails.GuardRail
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.agent.core.support.LlmUse
+import com.embabel.agent.spi.LlmService
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.Conversation
 import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
 import com.embabel.common.ai.model.LlmOptions
+import com.embabel.common.ai.model.PreResolvedModelSelectionCriteria
 import com.embabel.common.ai.prompt.PromptContributor
 import com.embabel.common.ai.prompt.PromptElement
 import com.embabel.common.core.thinking.ThinkingCapability
 import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.core.types.ZeroToOne
+import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.loggerFor
+import java.lang.reflect.Field
 import java.util.function.Predicate
 import kotlin.reflect.KProperty1
 
@@ -83,6 +91,14 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
     fun withLlm(llm: LlmOptions): PromptRunner
 
     /**
+     * Use a pre-resolved LLM service, bypassing ModelProvider resolution.
+     * Useful for BYOK (bring your own per-user key) scenarios,
+     * testing, or dynamic provider selection.
+     */
+    fun withLlmService(llmService: LlmService<*>): PromptRunner =
+        withLlm(LlmOptions(modelSelectionCriteria = PreResolvedModelSelectionCriteria(llmService)))
+
+    /**
      * Add a message that will be included in the final prompt.
      */
     fun withMessage(message: Message): PromptRunner =
@@ -112,6 +128,35 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
      */
     fun withToolGroup(toolGroup: String): PromptRunner =
         withToolGroup(ToolGroupRequirement(toolGroup))
+
+    /**
+     * Add a tool group with required tool names.
+     * Throws [com.embabel.agent.spi.loop.RequiredToolGroupException] at resolution time
+     * if the group is not found or any required tool name is absent.
+     *
+     * @param toolGroup name of the toolGroup we're requesting
+     * @param requiredToolNames tool names that must be present in the resolved group
+     */
+    fun withToolGroup(toolGroup: String, vararg requiredToolNames: String): PromptRunner =
+        withToolGroup(ToolGroupRequirement(toolGroup, requiredToolNames.toSet()))
+
+    /**
+     * Add a tool group with required tool names and a termination scope.
+     * When the group is not found or any required tool name is absent at resolution time,
+     * the behavior depends on [terminationScope]:
+     * - [TerminationScope.AGENT]: throws [com.embabel.agent.api.tool.TerminateAgentException], stopping the agent.
+     * - [TerminationScope.ACTION]: throws [com.embabel.agent.api.tool.TerminateActionException], skipping the action.
+     *
+     * @param toolGroup name of the toolGroup we're requesting
+     * @param terminationScope what to terminate when required tools are missing
+     * @param requiredToolNames tool names that must be present in the resolved group
+     */
+    fun withToolGroup(
+        toolGroup: String,
+        terminationScope: TerminationScope,
+        vararg requiredToolNames: String,
+    ): PromptRunner =
+        withToolGroup(ToolGroupRequirement(toolGroup, requiredToolNames.toSet(), terminationScope))
 
     /**
      * Allows for dynamic tool groups to be added to the PromptRunner.
@@ -339,6 +384,68 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
     fun withGuardRails(vararg guards: GuardRail): PromptRunner
 
     /**
+     * Add tool loop inspectors for observing tool loop lifecycle events.
+     * Inspectors are read-only observers useful for logging, metrics, and debugging.
+     *
+     * @param inspectors the inspectors to add
+     * @return PromptRunner instance with the added inspectors
+     */
+    fun withToolLoopInspectors(vararg inspectors: ToolLoopInspector): PromptRunner
+
+    /**
+     * Add tool loop transformers for modifying conversation history or tool results.
+     * Transformers can implement compression, summarization, or windowing strategies.
+     *
+     * @param transformers the transformers to add
+     * @return PromptRunner instance with the added transformers
+     */
+    fun withToolLoopTransformers(vararg transformers: ToolLoopTransformer): PromptRunner
+
+    /**
+     * Set out-of-band metadata to pass to tools at call time.
+     *
+     * The context flows through the tool loop to every tool invoked during this
+     * interaction. For MCP tools, entries are forwarded as MCP `_meta` on the wire
+     * (subject to any [com.embabel.agent.tools.mcp.ToolCallContextMcpMetaConverter]
+     * bean configured in the application).
+     *
+     * This context is merged with any context set at the process level via
+     * [com.embabel.agent.core.ProcessOptions]. Interaction-level values win on conflict.
+     *
+     * Example:
+     * ```kotlin
+     * ai.promptRunner()
+     *   .withToolCallContext(ToolCallContext.of("tenantId" to "acme", "locale" to "en-AU"))
+     *   .withToolGroup(CoreToolGroups.WEB)
+     *   .createObject<NewsResult>(prompt)
+     * ```
+     *
+     * @param context the context entries to attach
+     * @return PromptRunner with the tool call context set
+     */
+    fun withToolCallContext(context: ToolCallContext): PromptRunner
+
+    /**
+     * Convenience overload accepting a plain map.
+     *
+     * @param entries the context entries to attach
+     * @return PromptRunner with the tool call context set
+     */
+    fun withToolCallContext(entries: Map<String, Any>): PromptRunner =
+        withToolCallContext(ToolCallContext.of(entries))
+
+    /**
+     * Override the tool-not-found recovery policy for this interaction.
+     * When not set, the system default from configuration is used.
+     *
+     * @param policy the policy to use
+     * @return PromptRunner instance with the specified policy
+     * @see AutoCorrectionPolicy
+     * @see ImmediateThrowPolicy
+     */
+    fun withToolNotFoundPolicy(policy: ToolNotFoundPolicy): PromptRunner
+
+    /**
      * Returns a mode for creating strongly-typed objects.
      *
      * @param T the type of object to create
@@ -552,21 +659,33 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
         ): Creating<T>
 
         /**
+         * Add a filter that determines which fields are to be included when creating an object.
+         *
+         * Note that each predicate is applied *in addition to* previously registered predicates, including
+         * [withPropertyFilter], [withProperties] and [withoutProperties].
+         *
+         * @param filter the field predicate to be added
+         * @return this instance for method chaining
+         */
+        fun withFieldFilter(filter: Predicate<Field>): Creating<T>
+
+        /**
          * Add a filter that determines which properties are to be included when creating an object.
          *
          * Note that each predicate is applied *in addition to* previously registered predicates, including
-         * [withProperties] and [withoutProperties].
+         * [withFieldFilter], [withProperties] and [withoutProperties].
          *
          * @param filter the property predicate to be added
          * @return this instance for method chaining
          */
-        fun withPropertyFilter(filter: Predicate<String>): Creating<T>
+        fun withPropertyFilter(filter: Predicate<String>): Creating<T> =
+            withFieldFilter { filter.test(it.name) }
 
         /**
          * Include the given properties when creating an object.
          *
          * Note that each predicate is applied *in addition to* previously registered predicates, including
-         * [withPropertyFilter] and [withoutProperties].
+         * [withFieldFilter], [withPropertyFilter] and [withoutProperties].
          *
          * @param properties the properties that are to be included
          * @return this instance for method chaining
@@ -577,7 +696,7 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
          * Exclude the given properties when creating an object.
          *
          * Note that each predicate is applied *in addition to* previously registered predicates, including
-         * [withPropertyFilter] and [withProperties].
+         * [withFieldFilter], [withPropertyFilter] and [withProperties].
          *
          * @param properties the properties to be excluded
          * @return this instance for method chaining
@@ -649,6 +768,13 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
      * Instances are obtained via [PromptRunner.rendering].
      */
     interface Rendering {
+
+        /**
+         * Set the template renderer to use for rendering templates in this mode.
+         * By default, this Renderer will use the platform's default TemplateRenderer, but this allows for custom renderers to be used on a per-rendering basis.
+         */
+        fun withTemplateRenderer(templateRenderer: TemplateRenderer): Rendering
+
         /**
          * Create an object of the given type using the given model to render the template
          * and LLM options from context.
@@ -684,6 +810,39 @@ interface PromptRunner : LlmUse, PromptRunnerOperations, ToolChaining<PromptRunn
          */
         fun respondWithSystemPrompt(
             conversation: Conversation,
+            model: Map<String, Any> = emptyMap(),
+        ): AssistantMessage
+
+        /**
+         * Safely respond to the user in the conversation using the rendered template as system prompt, returning an error message if something goes wrong.
+         * Cannot throw an exception.
+         * @param conversation the conversation so far
+         * @param model the model data to render the system prompt template with.
+         * @param onFailure a function that takes the error and returns an AssistantMessage to be sent back to the user in case of failure. This allows for graceful error handling and user feedback without throwing exceptions.
+         */
+        fun respond(
+            conversation: Conversation,
+            model: Map<String, Any>,
+            onFailure: ((Throwable) -> AssistantMessage),
+        ): AssistantMessage = try {
+            respondWithSystemPrompt(conversation, model)
+        } catch (error: Throwable) {
+            loggerFor<Rendering>().warn("Failed to respond with system prompt", error)
+            onFailure(error)
+        }
+
+        /**
+         * Respond to a system-initiated trigger using the rendered template as system prompt.
+         * The trigger prompt is appended as a user message to the LLM call but not stored in the conversation.
+         *
+         * @param conversation the conversation so far
+         * @param triggerPrompt the trigger prompt to send to the LLM
+         * @param model the model data to render the system prompt template with
+         * @return the assistant message response
+         */
+        fun respondWithTrigger(
+            conversation: Conversation,
+            triggerPrompt: String,
             model: Map<String, Any> = emptyMap(),
         ): AssistantMessage
     }

@@ -15,6 +15,7 @@
  */
 package com.embabel.agent.core
 
+import com.embabel.agent.api.common.TerminationScope
 import com.embabel.agent.api.tool.Tool
 import com.embabel.common.core.types.AssetCoordinates
 import com.embabel.common.core.types.HasInfoString
@@ -39,14 +40,24 @@ interface ToolGroupDescription {
      */
     val role: String
 
+    /**
+     * Optional usage notes shown to the LLM when this tool group is unfolded.
+     * Used to guide the LLM on how to use the inner tools effectively.
+     * Propagated to [com.embabel.agent.api.tool.progressive.UnfoldingTool.childToolUsageNotes].
+     */
+    val childToolUsageNotes: String?
+        get() = null
+
     companion object {
 
         operator fun invoke(
             description: String,
             role: String,
+            childToolUsageNotes: String? = null,
         ): ToolGroupDescription = ToolGroupDescriptionImpl(
             description = description,
             role = role,
+            childToolUsageNotes = childToolUsageNotes,
         )
 
         @JvmStatic
@@ -64,6 +75,7 @@ interface ToolGroupDescription {
 private data class ToolGroupDescriptionImpl(
     override val description: String,
     override val role: String,
+    override val childToolUsageNotes: String? = null,
 ) : ToolGroupDescription
 
 enum class ToolGroupPermission {
@@ -128,9 +140,18 @@ interface ToolGroupMetadata : ToolGroupDescription, AssetCoordinates, HasInfoStr
 
 /**
  * Specifies a tool group that a tool consumer requires.
+ * @param requiredToolNames optional set of tool names that must be present in the resolved group.
+ * When non-empty, resolution throws an exception if the group is not found or any required tool name is absent.
+ * An empty set (default) preserves backward-compatible behavior: a missing group is logged and tolerated.
+ * @param terminationScope controls the exception type thrown when required tools are missing.
+ * When null (default), throws [com.embabel.agent.spi.loop.RequiredToolGroupException].
+ * When [TerminationScope.AGENT], throws [com.embabel.agent.api.tool.TerminateAgentException].
+ * When [TerminationScope.ACTION], throws [com.embabel.agent.api.tool.TerminateActionException].
  */
 data class ToolGroupRequirement(
     val role: String,
+    val requiredToolNames: Set<String> = emptySet(),
+    val terminationScope: TerminationScope? = null,
 )
 
 interface ToolGroupConsumer {
@@ -186,18 +207,19 @@ interface ToolGroup : ToolPublisher, HasInfoString {
         verbose: Boolean?,
         indent: Int,
     ): String {
+        // Do NOT access `tools` unless verbose=true is explicitly requested.
+        // For MCP-backed groups, `tools` is a lazy property whose first access
+        // triggers the MCP client handshake. Accessing it unconditionally — even
+        // just to check isEmpty() — defeats just-in-time initialization.
+        if (verbose != true) {
+            return metadata.infoString(verbose = false)
+        }
         val allToolNames = tools.map { it.definition.name }
         if (allToolNames.isEmpty()) {
             return metadata.infoString(verbose = true, indent = 1) + "- No tools found".indent(1)
         }
-        return when (verbose) {
-            true -> metadata.infoString(verbose = true, indent = 1) + " - " +
-                    allToolNames.sorted().joinToString().indent(1)
-
-            else -> {
-                metadata.infoString(verbose = false)
-            }
-        }
+        return metadata.infoString(verbose = true, indent = 1) + " - " +
+                allToolNames.sorted().joinToString().indent(1)
     }
 }
 

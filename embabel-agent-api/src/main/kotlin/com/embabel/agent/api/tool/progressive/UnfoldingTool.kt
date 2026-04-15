@@ -23,13 +23,14 @@ import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.core.AgentProcess
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
-import org.slf4j.LoggerFactory
-import org.springframework.beans.BeanUtils
-import org.springframework.core.KotlinDetector
 import kotlin.reflect.full.createInstance
 import kotlin.reflect.full.findAnnotation
 import kotlin.reflect.full.functions
 import kotlin.reflect.full.hasAnnotation
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
+import org.springframework.beans.BeanUtils
+import org.springframework.core.KotlinDetector
 
 /**
  * A [ProgressiveTool] with a fixed set of inner tools that are revealed
@@ -83,25 +84,30 @@ interface UnfoldingTool : ProgressiveTool {
     val childToolUsageNotes: String? get() = null
 
     /**
+     * When true, expanding this tool removes ALL other tools from the LLM's
+     * tool set — the LLM will only see the inner tools until the interaction
+     * ends. Use this for tools where the LLM consistently picks the wrong
+     * sibling tool instead of using the inner tools (e.g., personality changes).
+     *
+     * Defaults to false for backward compatibility.
+     */
+    val exclusive: Boolean get() = false
+
+    /**
      * Whether to remove this tool after invocation.
      *
-     * When `true` (default), the facade is replaced by its contents.
-     * When `false`, the facade remains available for re-invocation
-     * (useful for category-based selection with different arguments).
+     * @deprecated Always replaced by a guide tool after first invocation.
+     * The guide lists available sub-tools if the LLM calls the parent again,
+     * preventing ToolNotFoundException loops. This property is ignored.
      */
+    @Deprecated("Always replaced by guide tool after invocation. This property is ignored.")
     val removeOnInvoke: Boolean get() = true
 
     /**
-     * Whether to include a context tool when this tool is unfolded.
-     *
-     * When `true` (default), a `{name}_context` tool is created that preserves
-     * the parent's description and lists available child tools.
-     * When `false`, no context tool is created — useful when the parent's
-     * [call] response and [childToolUsageNotes] provide sufficient guidance,
-     * or when the context tool confuses the LLM into calling it repeatedly
-     * instead of the actual child tools.
+     * @deprecated The guide tool replaces the context tool. This property is ignored.
      */
-    val includeContextTool: Boolean get() = true
+    @Deprecated("Guide tool replaces context tool. This property is ignored.", level = DeprecationLevel.HIDDEN)
+    val includeContextTool: Boolean get() = false
 
     /**
      * Select which inner tools to expose based on invocation input.
@@ -133,6 +139,7 @@ interface UnfoldingTool : ProgressiveTool {
         innerTools = innerTools + tools.toList(),
         removeOnInvoke = removeOnInvoke,
         childToolUsageNotes = childToolUsageNotes,
+        exclusive = exclusive,
     )
 
     /**
@@ -157,6 +164,7 @@ interface UnfoldingTool : ProgressiveTool {
             innerTools = innerTools + additionalTools,
             removeOnInvoke = removeOnInvoke,
             childToolUsageNotes = childToolUsageNotes,
+            exclusive = exclusive,
         )
     }
 
@@ -174,14 +182,16 @@ interface UnfoldingTool : ProgressiveTool {
          * @param innerTools The tools to expose when invoked
          * @param removeOnInvoke Whether to remove this tool after invocation (default true)
          * @param childToolUsageNotes Optional notes to guide LLM on using the child tools
+         * @param exclusive When true, removes ALL other tools on expansion (default false)
          */
-        @JvmOverloads
+        @Suppress("DEPRECATION")
         open fun of(
             name: String,
             description: String,
             innerTools: List<Tool>,
             removeOnInvoke: Boolean = true,
             childToolUsageNotes: String? = null,
+            exclusive: Boolean = false,
         ): UnfoldingTool = SimpleUnfoldingTool(
             definition = Tool.Definition(
                 name = name,
@@ -191,6 +201,7 @@ interface UnfoldingTool : ProgressiveTool {
             innerTools = innerTools,
             removeOnInvoke = removeOnInvoke,
             childToolUsageNotes = childToolUsageNotes,
+            exclusive = exclusive,
         )
 
         /**
@@ -227,7 +238,6 @@ interface UnfoldingTool : ProgressiveTool {
          * @param childToolUsageNotes Optional notes to guide LLM on using the child tools
          * @param selector Function to select tools based on input
          */
-        @JvmOverloads
         open fun selectable(
             name: String,
             description: String,
@@ -258,7 +268,6 @@ interface UnfoldingTool : ProgressiveTool {
          * @param removeOnInvoke Whether to remove this tool after invocation
          * @param childToolUsageNotes Optional notes to guide LLM on using the child tools
          */
-        @JvmOverloads
         open fun byCategory(
             name: String,
             description: String,
@@ -290,6 +299,52 @@ interface UnfoldingTool : ProgressiveTool {
                     val category = extractCategory(input, categoryParameter)
                     toolsByCategory[category] ?: allTools
                 },
+            )
+        }
+
+        /**
+         * Create an UnfoldingTool from any object with `@LlmTool` methods, providing
+         * explicit name and description.
+         *
+         * Unlike [fromInstance], this does NOT require the class to be annotated with
+         * `@UnfoldingTools` or `@MatryoshkaTools`. The name and description are provided
+         * as parameters rather than being derived from a class-level annotation.
+         *
+         * This is useful for wrapping tool objects (e.g., interface implementations with
+         * `@LlmTool` default methods) that cannot or should not be annotated with
+         * `@UnfoldingTools`.
+         *
+         * Example:
+         * ```kotlin
+         * val fileTools = UnfoldingTool.fromToolObject(
+         *     instance = FileWriteTools(),
+         *     name = "file_write_tools",
+         *     description = "Tools for writing files",
+         * )
+         * ```
+         *
+         * @param instance Any object with `@LlmTool` annotated methods
+         * @param name Unique name for the UnfoldingTool
+         * @param description Description explaining when to use this tool category
+         * @param removeOnInvoke Whether to remove this tool after invocation (default true)
+         * @param childToolUsageNotes Optional notes to guide LLM on using the child tools
+         * @return An UnfoldingTool wrapping the annotated methods
+         * @throws IllegalArgumentException if the object has no `@LlmTool` methods
+         */
+        open fun fromToolObject(
+            instance: Any,
+            name: String,
+            description: String,
+            removeOnInvoke: Boolean = true,
+            childToolUsageNotes: String? = null,
+        ): UnfoldingTool {
+            val tools = Tool.fromInstance(instance)
+            return of(
+                name = name,
+                description = description,
+                innerTools = tools,
+                removeOnInvoke = removeOnInvoke,
+                childToolUsageNotes = childToolUsageNotes,
             )
         }
 
@@ -342,7 +397,6 @@ interface UnfoldingTool : ProgressiveTool {
          * @throws IllegalArgumentException if the class is not annotated with `@MatryoshkaTools`
          *         or has no `@LlmTool` methods
          */
-        @JvmOverloads
         open fun fromInstance(
             instance: Any,
             objectMapper: ObjectMapper = jacksonObjectMapper(),
@@ -361,7 +415,6 @@ interface UnfoldingTool : ProgressiveTool {
          * @param objectMapper ObjectMapper for JSON parsing (optional)
          * @return An UnfoldingTool if the instance is properly annotated, null otherwise
          */
-        @JvmOverloads
         open fun safelyFromInstance(
             instance: Any,
             objectMapper: ObjectMapper = jacksonObjectMapper(),
@@ -403,6 +456,7 @@ interface UnfoldingTool : ProgressiveTool {
                     categoryParameter = unfoldingAnnotation.categoryParameter,
                     childToolUsageNotes = unfoldingAnnotation.childToolUsageNotes,
                 )
+
                 matryoshkaAnnotation != null -> AnnotationValues(
                     name = matryoshkaAnnotation.name,
                     description = matryoshkaAnnotation.description,
@@ -410,6 +464,7 @@ interface UnfoldingTool : ProgressiveTool {
                     categoryParameter = matryoshkaAnnotation.categoryParameter,
                     childToolUsageNotes = matryoshkaAnnotation.childToolUsageNotes,
                 )
+
                 else -> throw IllegalArgumentException(
                     "Class ${klass.simpleName} is not annotated with @MatryoshkaTools or @UnfoldingTools"
                 )
@@ -532,6 +587,7 @@ interface UnfoldingTool : ProgressiveTool {
                     categoryParameter = unfoldingAnnotation.categoryParameter,
                     childToolUsageNotes = unfoldingAnnotation.childToolUsageNotes,
                 )
+
                 matryoshkaAnnotation != null -> AnnotationValues(
                     name = matryoshkaAnnotation.name,
                     description = matryoshkaAnnotation.description,
@@ -539,6 +595,7 @@ interface UnfoldingTool : ProgressiveTool {
                     categoryParameter = matryoshkaAnnotation.categoryParameter,
                     childToolUsageNotes = matryoshkaAnnotation.childToolUsageNotes,
                 )
+
                 else -> throw IllegalArgumentException(
                     "Class ${clazz.simpleName} is not annotated with @MatryoshkaTools or @UnfoldingTools"
                 )
@@ -646,8 +703,9 @@ interface UnfoldingTool : ProgressiveTool {
         }
 
         protected companion object {
+
             @JvmStatic
-            protected val logger = LoggerFactory.getLogger(UnfoldingTool::class.java)
+            protected val logger: Logger = LoggerFactory.getLogger(UnfoldingTool::class.java)
 
             @JvmStatic
             protected fun extractCategory(input: String, paramName: String): String? {
@@ -664,25 +722,121 @@ interface UnfoldingTool : ProgressiveTool {
         }
     }
 
-    companion object : Factory()
+    companion object : Factory() {
+
+        // Full-param overrides for Java callers (all parameters required)
+
+        @JvmStatic
+        @Suppress("DEPRECATION")
+        override fun of(
+            name: String,
+            description: String,
+            innerTools: List<Tool>,
+            removeOnInvoke: Boolean,
+            childToolUsageNotes: String?,
+            exclusive: Boolean,
+        ): UnfoldingTool = super.of(name, description, innerTools, removeOnInvoke, childToolUsageNotes, exclusive)
+
+        @JvmStatic
+        @Suppress("DEPRECATION")
+        fun of(
+            name: String,
+            description: String,
+            innerTools: List<Tool>,
+            removeOnInvoke: Boolean,
+            childToolUsageNotes: String?,
+        ): UnfoldingTool = super.of(name, description, innerTools, removeOnInvoke, childToolUsageNotes, false)
+
+        @JvmStatic
+        @Suppress("DEPRECATION")
+        override fun byCategory(
+            name: String,
+            description: String,
+            toolsByCategory: Map<String, List<Tool>>,
+            categoryParameter: String,
+            removeOnInvoke: Boolean,
+            childToolUsageNotes: String?,
+        ): UnfoldingTool = super.byCategory(
+            name, description, toolsByCategory, categoryParameter, removeOnInvoke, childToolUsageNotes,
+        )
+
+        @JvmStatic
+        override fun fromToolObject(
+            instance: Any,
+            name: String,
+            description: String,
+            removeOnInvoke: Boolean,
+            childToolUsageNotes: String?,
+        ): UnfoldingTool = super.fromToolObject(instance, name, description, removeOnInvoke, childToolUsageNotes)
+
+        @JvmStatic
+        override fun fromInstance(
+            instance: Any,
+            objectMapper: ObjectMapper,
+        ): UnfoldingTool = super.fromInstance(instance, objectMapper)
+
+        @JvmStatic
+        override fun safelyFromInstance(
+            instance: Any,
+            objectMapper: ObjectMapper,
+        ): UnfoldingTool? = super.safelyFromInstance(instance, objectMapper)
+
+        // Short-param convenience overloads for Java callers
+
+        @JvmStatic
+        @Suppress("DEPRECATION")
+        fun of(
+            name: String,
+            description: String,
+            innerTools: List<Tool>,
+        ): UnfoldingTool = super.of(name, description, innerTools, true, null, false)
+
+        @JvmStatic
+        @Suppress("DEPRECATION")
+        fun byCategory(
+            name: String,
+            description: String,
+            toolsByCategory: Map<String, List<Tool>>,
+        ): UnfoldingTool = super.byCategory(name, description, toolsByCategory, "category", true, null)
+
+        @JvmStatic
+        fun fromToolObject(
+            instance: Any,
+            name: String,
+            description: String,
+        ): UnfoldingTool = super.fromToolObject(instance, name, description, true, null)
+
+        @JvmStatic
+        fun fromInstance(instance: Any): UnfoldingTool =
+            super.fromInstance(instance, jacksonObjectMapper())
+
+        @JvmStatic
+        fun safelyFromInstance(instance: Any): UnfoldingTool? =
+            super.safelyFromInstance(instance, jacksonObjectMapper())
+    }
 }
 
 /**
  * Simple implementation that exposes all inner tools.
  * Implements MatryoshkaTool for backward compatibility.
  */
+@Suppress("DEPRECATION")
 internal class SimpleUnfoldingTool(
     override val definition: Tool.Definition,
     override val innerTools: List<Tool>,
     override val removeOnInvoke: Boolean,
     override val childToolUsageNotes: String? = null,
+    override val exclusive: Boolean = false,
 ) : MatryoshkaTool {
 
     override fun call(input: String): Tool.Result {
-        val toolNames = innerTools.map { it.definition.name }
-        return Tool.Result.text(
-            "Enabled ${innerTools.size} tools: ${toolNames.joinToString(", ")}"
-        )
+        // Check if the LLM tried to shortcut the two-step unfolding pattern by passing
+        // inner tool arguments directly (e.g. tasks({"create_task": {...}}) instead of
+        // tasks({}) then create_task({...})). If so, dispatch to the inner tool immediately.
+        val shortcutResult = tryShortcutDispatch(input, innerTools)
+        if (shortcutResult != null) return shortcutResult
+
+        return Tool.Result.text(buildUnfoldedMessage(innerTools))
     }
 }
 
@@ -690,23 +844,77 @@ internal class SimpleUnfoldingTool(
  * Implementation with custom tool selection logic.
  * Implements MatryoshkaTool for backward compatibility.
  */
+@Suppress("DEPRECATION")
 internal class SelectableUnfoldingTool(
     override val definition: Tool.Definition,
     override val innerTools: List<Tool>,
     override val removeOnInvoke: Boolean,
     override val childToolUsageNotes: String? = null,
+    override val exclusive: Boolean = false,
     private val selector: (String) -> List<Tool>,
 ) : MatryoshkaTool {
 
     override fun selectTools(input: String): List<Tool> = selector(input)
 
     override fun call(input: String): Tool.Result {
+        val shortcutResult = tryShortcutDispatch(input, innerTools)
+        if (shortcutResult != null) return shortcutResult
+
         val selected = selectTools(input)
-        val toolNames = selected.map { it.definition.name }
-        return Tool.Result.text(
-            "Enabled ${selected.size} tools: ${toolNames.joinToString(", ")}"
-        )
+        return Tool.Result.text(buildUnfoldedMessage(selected))
     }
+}
+
+/**
+ * Build the message returned when an UnfoldingTool is invoked.
+ * This message appears as a tool result in the conversation history and
+ * strongly directs the LLM to call one of the revealed inner tools
+ * rather than generating a text response.
+ */
+private fun buildUnfoldedMessage(tools: List<Tool>): String {
+    val toolNames = tools.map { it.definition.name }
+    return "Tools now available: ${toolNames.joinToString(", ")}. " +
+            "You MUST call one of these tools to complete the user's request. " +
+            "Do NOT respond with text — call a tool."
+}
+
+private val shortcutLogger: Logger = LoggerFactory.getLogger("com.embabel.agent.api.tool.progressive.UnfoldingShortcut")
+private val shortcutMapper = jacksonObjectMapper()
+
+/**
+ * Detects when an LLM tries to shortcut the two-step unfolding pattern by passing
+ * inner tool arguments directly in the outer tool call.
+ *
+ * For example, if the LLM calls `tasks({"create_task": {"name": "foo", ...}})`,
+ * this detects that `create_task` is an inner tool name and dispatches to it
+ * with the nested arguments, rather than ignoring the payload.
+ *
+ * Returns null if no shortcut was detected (normal unfolding path).
+ */
+internal fun tryShortcutDispatch(input: String, innerTools: List<Tool>): Tool.Result? {
+    if (input.isBlank() || input == "{}") return null
+    val parsed = try { shortcutMapper.readTree(input) } catch (_: Exception) { return null }
+    if (!parsed.isObject) return null
+
+    val innerToolsByName = innerTools.associateBy { it.definition.name }
+    for (fieldName in parsed.fieldNames()) {
+        val innerTool = innerToolsByName[fieldName]
+        if (innerTool != null) {
+            val nestedArgs = parsed.get(fieldName)
+            val argsString = if (nestedArgs.isObject || nestedArgs.isArray) {
+                nestedArgs.toString()
+            } else {
+                // Scalar value — wrap as the tool might expect
+                nestedArgs.toString()
+            }
+            shortcutLogger.info(
+                "Shortcut dispatch: LLM passed '{}' arguments to outer tool — forwarding to inner tool",
+                fieldName,
+            )
+            return innerTool.call(argsString)
+        }
+    }
+    return null
 }
 
 /**

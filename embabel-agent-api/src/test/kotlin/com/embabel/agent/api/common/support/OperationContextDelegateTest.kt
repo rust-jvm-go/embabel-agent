@@ -20,11 +20,14 @@ import com.embabel.agent.api.common.ActionContext
 import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.common.OperationContext
 import com.embabel.agent.api.common.PlatformServices
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.Action
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcess
+import com.embabel.agent.core.ProcessContext
 import com.embabel.agent.core.ToolGroupRequirement
+import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.chat.UserMessage
 import com.embabel.common.ai.model.LlmOptions
@@ -232,6 +235,126 @@ class OperationContextDelegateTest {
     }
 
     @Nested
+    inner class ToolCallContextTest {
+
+        private fun createMockedContext(): Pair<ActionContext, ProcessContext> {
+            val mockProcessContext = mockk<ProcessContext>(relaxed = true)
+            val mockAgentProcess = mockk<AgentProcess>(relaxed = true)
+            val mockChatClientOps = mockk<com.embabel.agent.spi.support.springai.ChatClientLlmOperations>(relaxed = true)
+            val mockPlatformServices = mockk<PlatformServices>(relaxed = true)
+            val mockAgentPlatform = mockk<AgentPlatform>(relaxed = true)
+
+            every { mockPlatformServices.llmOperations } returns mockChatClientOps
+            every { mockAgentPlatform.platformServices } returns mockPlatformServices
+            every { mockProcessContext.agentProcess } returns mockAgentProcess
+
+            val mockContext = mockk<ActionContext>(relaxed = true)
+            every { mockContext.processContext } returns mockProcessContext
+            every { mockContext.agentProcess } returns mockAgentProcess
+            every { mockContext.agentPlatform() } returns mockAgentPlatform
+            every { mockContext.action } returns mockk(relaxed = true)
+
+            return mockContext to mockProcessContext
+        }
+
+        @Test
+        fun `withToolCallContext sets context on resulting LlmInteraction`() {
+            val (mockContext, mockProcessContext) = createMockedContext()
+
+            val capturedInteraction = mutableListOf<LlmInteraction>()
+            every {
+                mockProcessContext.createObject<TestResult>(any(), capture(capturedInteraction), any(), any(), any())
+            } returns TestResult("result")
+
+            val ctx = ToolCallContext.of("tenantId" to "acme", "locale" to "en-AU")
+
+            OperationContextDelegate(
+                context = mockContext,
+                llm = LlmOptions(),
+                toolGroups = emptySet(),
+                toolObjects = emptyList(),
+                promptContributors = emptyList(),
+            )
+                .withToolCallContext(ctx)
+                .createObject(listOf(UserMessage("test")), TestResult::class.java)
+
+            assertEquals(1, capturedInteraction.size)
+            val interaction = capturedInteraction.first()
+            assertEquals("acme", interaction.toolCallContext.get<String>("tenantId"))
+            assertEquals("en-AU", interaction.toolCallContext.get<String>("locale"))
+        }
+
+        @Test
+        fun `withToolCallContext accumulates across multiple calls`() {
+            val (mockContext, mockProcessContext) = createMockedContext()
+
+            val capturedInteraction = mutableListOf<LlmInteraction>()
+            every {
+                mockProcessContext.createObject<TestResult>(any(), capture(capturedInteraction), any(), any(), any())
+            } returns TestResult("result")
+
+            OperationContextDelegate(
+                context = mockContext,
+                llm = LlmOptions(),
+                toolGroups = emptySet(),
+                toolObjects = emptyList(),
+                promptContributors = emptyList(),
+            )
+                .withToolCallContext(ToolCallContext.of("tenantId" to "acme"))
+                .withToolCallContext(ToolCallContext.of("locale" to "en-AU"))
+                .createObject(listOf(UserMessage("test")), TestResult::class.java)
+
+            val interaction = capturedInteraction.first()
+            assertEquals("acme", interaction.toolCallContext.get<String>("tenantId"))
+            assertEquals("en-AU", interaction.toolCallContext.get<String>("locale"))
+        }
+
+        @Test
+        fun `withToolCallContext interaction value wins on conflict`() {
+            val (mockContext, mockProcessContext) = createMockedContext()
+
+            val capturedInteraction = mutableListOf<LlmInteraction>()
+            every {
+                mockProcessContext.createObject<TestResult>(any(), capture(capturedInteraction), any(), any(), any())
+            } returns TestResult("result")
+
+            OperationContextDelegate(
+                context = mockContext,
+                llm = LlmOptions(),
+                toolGroups = emptySet(),
+                toolObjects = emptyList(),
+                promptContributors = emptyList(),
+            )
+                .withToolCallContext(ToolCallContext.of("tenantId" to "first"))
+                .withToolCallContext(ToolCallContext.of("tenantId" to "override"))
+                .createObject(listOf(UserMessage("test")), TestResult::class.java)
+
+            val interaction = capturedInteraction.first()
+            assertEquals("override", interaction.toolCallContext.get<String>("tenantId"))
+        }
+
+        @Test
+        fun `no context produces EMPTY toolCallContext on LlmInteraction`() {
+            val (mockContext, mockProcessContext) = createMockedContext()
+
+            val capturedInteraction = mutableListOf<LlmInteraction>()
+            every {
+                mockProcessContext.createObject<TestResult>(any(), capture(capturedInteraction), any(), any(), any())
+            } returns TestResult("result")
+
+            OperationContextDelegate(
+                context = mockContext,
+                llm = LlmOptions(),
+                toolGroups = emptySet(),
+                toolObjects = emptyList(),
+                promptContributors = emptyList(),
+            ).createObject(listOf(UserMessage("test")), TestResult::class.java)
+
+            assertTrue(capturedInteraction.first().toolCallContext.isEmpty)
+        }
+    }
+
+    @Nested
     inner class ThinkingMethodsTest {
 
         private fun createMockedContext(): Triple<ActionContext, ChatClientLlmOperations, AgentProcess> {
@@ -253,12 +376,14 @@ class OperationContextDelegateTest {
         }
 
         @Test
-        fun `createObjectWithThinking should call underlying method`() {
-            val (mockContext, mockChatClientOps, _) = createMockedContext()
+        fun `createObjectWithThinking should call ProcessContext createObjectWithThinking`() {
+            val (mockContext, _, _) = createMockedContext()
+            val mockProcessContext = mockk<ProcessContext>(relaxed = true)
 
+            every { mockContext.processContext } returns mockProcessContext
             every {
-                mockChatClientOps.doTransformWithThinking<TestResult>(
-                    any(), any(), any(), any(), any(), any()
+                mockProcessContext.createObjectWithThinking<TestResult>(
+                    any(), any(), any(), any(), any()
                 )
             } returns ThinkingResponse(result = TestResult("test"), thinkingBlocks = emptyList())
 
@@ -273,20 +398,22 @@ class OperationContextDelegateTest {
             val result = delegate.createObjectWithThinking(listOf(UserMessage("test")), TestResult::class.java)
 
             verify {
-                mockChatClientOps.doTransformWithThinking<TestResult>(
-                    any(), any(), any(), any(), any(), any()
+                mockProcessContext.createObjectWithThinking<TestResult>(
+                    any(), any(), any(), any(), any()
                 )
             }
             assertEquals("test", result.result?.value)
         }
 
         @Test
-        fun `createObjectIfPossibleWithThinking should call underlying method`() {
-            val (mockContext, mockChatClientOps, _) = createMockedContext()
+        fun `createObjectIfPossibleWithThinking should call ProcessContext createObjectIfPossibleWithThinking`() {
+            val (mockContext, _, _) = createMockedContext()
+            val mockProcessContext = mockk<ProcessContext>(relaxed = true)
 
+            every { mockContext.processContext } returns mockProcessContext
             every {
-                mockChatClientOps.doTransformWithThinkingIfPossible<TestResult>(
-                    any(), any(), any(), any(), any(), any()
+                mockProcessContext.createObjectIfPossibleWithThinking<TestResult>(
+                    any(), any(), any(), any(), any()
                 )
             } returns Result.success(ThinkingResponse(result = TestResult("test"), thinkingBlocks = emptyList()))
 
@@ -302,8 +429,8 @@ class OperationContextDelegateTest {
                 delegate.createObjectIfPossibleWithThinking(listOf(UserMessage("test")), TestResult::class.java)
 
             verify {
-                mockChatClientOps.doTransformWithThinkingIfPossible<TestResult>(
-                    any(), any(), any(), any(), any(), any()
+                mockProcessContext.createObjectIfPossibleWithThinking<TestResult>(
+                    any(), any(), any(), any(), any()
                 )
             }
             assertEquals("test", result.result?.value)

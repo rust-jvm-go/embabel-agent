@@ -15,9 +15,13 @@
  */
 package com.embabel.agent.spi.config.spring
 
+import com.embabel.agent.api.common.Asyncer
 import com.embabel.agent.api.tool.config.ToolLoopConfiguration
+import com.embabel.agent.spi.loop.AutoCorrectionPolicy
 import com.embabel.agent.spi.loop.ToolLoopFactory
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import org.slf4j.LoggerFactory
+import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
@@ -40,8 +44,15 @@ class ToolLoopFactoryConfiguration(
     }
 
     @Bean
-    fun toolLoopFactory(): ToolLoopFactory {
-        logger.info("Creating ToolLoopFactory with type: {}", config.type)
-        return ToolLoopFactory.withConfig(config)
+    @ConditionalOnMissingBean
+    fun toolNotFoundPolicy(): ToolNotFoundPolicy = AutoCorrectionPolicy(
+        maxRetries = config.toolNotFound.maxRetries,
+        minFuzzyLength = config.toolNotFound.minFuzzyLength,
+    )
+
+    @Bean
+    fun toolLoopFactory(asyncer: Asyncer, toolNotFoundPolicy: ToolNotFoundPolicy): ToolLoopFactory {
+        logger.info("Creating ToolLoopFactory with type: {}, using injected Asyncer", config.type)
+        return ToolLoopFactory.create(config, asyncer, toolNotFoundPolicy)
     }
 }

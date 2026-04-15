@@ -15,12 +15,7 @@
  */
 package com.embabel.agent.api.common.support
 
-import com.embabel.agent.api.common.ActionContext
-import com.embabel.agent.api.common.AgentImage
-import com.embabel.agent.api.common.ContextualPromptElement
-import com.embabel.agent.api.common.InteractionId
-import com.embabel.agent.api.common.OperationContext
-import com.embabel.agent.api.common.PromptRunner
+import com.embabel.agent.api.common.*
 import com.embabel.agent.api.common.nested.support.PromptRunnerCreating
 import com.embabel.agent.api.common.nested.support.PromptRunnerRendering
 import com.embabel.agent.api.common.streaming.StreamingPromptRunner
@@ -28,14 +23,18 @@ import com.embabel.agent.api.common.support.streaming.StreamingCapabilityDetecto
 import com.embabel.agent.api.common.support.streaming.StreamingImpl
 import com.embabel.agent.api.common.thinking.support.ThinkingPromptRunnerOperationsImpl
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.tool.agentic.DomainToolPredicate
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
 import com.embabel.agent.api.validation.guardrails.GuardRail
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetTools
 import com.embabel.agent.experimental.primitive.Determination
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.agent.spi.support.springai.streaming.StreamingChatClientOperations
 import com.embabel.chat.ImagePart
@@ -46,6 +45,7 @@ import com.embabel.common.ai.model.Thinking
 import com.embabel.common.ai.prompt.PromptContributor
 import com.embabel.common.core.types.ZeroToOne
 import com.embabel.common.util.loggerFor
+import java.lang.reflect.Field
 import java.util.function.Predicate
 
 /**
@@ -63,10 +63,12 @@ internal data class OperationContextPromptRunner(
     override val promptContributors: List<PromptContributor>,
     private val contextualPromptContributors: List<ContextualPromptElement>,
     override val generateExamples: Boolean?,
-    override val propertyFilter: Predicate<String> = Predicate { true },
+    override val fieldFilter: Predicate<Field> = Predicate { true },
     override val validation: Boolean = true,
     private val otherTools: List<Tool> = emptyList(),
     private val guardRails: List<GuardRail> = emptyList(),
+    private val inspectors: List<ToolLoopInspector> = emptyList(),
+    private val transformers: List<ToolLoopTransformer> = emptyList(),
 ) : StreamingPromptRunner {
 
     val action = (context as? ActionContext)?.action
@@ -137,9 +139,11 @@ internal data class OperationContextPromptRunner(
                 promptContributors = allPromptContributors,
                 id = interactionId ?: idForPrompt(messages, outputClass),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 validation = validation,
                 guardRails = guardRails,
+                inspectors = inspectors,
+                transformers = transformers,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -165,9 +169,11 @@ internal data class OperationContextPromptRunner(
                 },
                 id = interactionId ?: idForPrompt(messages, outputClass),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 validation = validation,
                 guardRails = guardRails,
+                inspectors = inspectors,
+                transformers = transformers,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -225,6 +231,8 @@ internal data class OperationContextPromptRunner(
     override fun withLlm(llm: LlmOptions): PromptRunner =
         copy(llm = llm)
 
+    override fun withLlmService(llmService: com.embabel.agent.spi.LlmService<*>): PromptRunner = this
+
     override fun withToolGroup(toolGroup: ToolGroupRequirement): PromptRunner =
         copy(toolGroups = this.toolGroups + toolGroup)
 
@@ -250,7 +258,7 @@ internal data class OperationContextPromptRunner(
 
     @Deprecated("Use creating().withPropertyFilter() instead")
     override fun withPropertyFilter(filter: Predicate<String>): PromptRunner =
-        copy(propertyFilter = this.propertyFilter.and(filter))
+        copy(fieldFilter = this.fieldFilter.and({ filter.test(it.name) }))
 
     @Deprecated("Use creating().withValidation() instead")
     override fun withValidation(validation: Boolean): PromptRunner =
@@ -301,8 +309,10 @@ internal data class OperationContextPromptRunner(
                 },
                 id = interactionId ?: InteractionId("${context.operation.name}-streaming"),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 guardRails = guardRails,
+                inspectors = inspectors,
+                transformers = transformers,
             ),
             messages = messages,
             agentProcess = context.processContext.agentProcess,
@@ -348,8 +358,10 @@ internal data class OperationContextPromptRunner(
                 },
                 id = interactionId ?: InteractionId("${context.operation.name}-thinking"),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 guardRails = guardRails,
+                inspectors = inspectors,
+                transformers = transformers,
             ),
             messages = messages,
             agentProcess = context.processContext.agentProcess,
@@ -366,10 +378,27 @@ internal data class OperationContextPromptRunner(
         )
     }
 
+    override fun withToolLoopInspectors(vararg inspectors: ToolLoopInspector): PromptRunner {
+        return copy(
+            inspectors = this.inspectors + inspectors
+        )
+    }
+
+    override fun withToolLoopTransformers(vararg transformers: ToolLoopTransformer): PromptRunner {
+        return copy(
+            transformers = this.transformers + transformers
+        )
+    }
+
+    override fun withToolNotFoundPolicy(policy: ToolNotFoundPolicy): PromptRunner = this
+
     override fun <T : Any> withToolChainingFrom(
         type: Class<T>,
         predicate: DomainToolPredicate<T>,
     ): PromptRunner = this
+
+    override fun withToolCallContext(context: ToolCallContext): PromptRunner =
+        copy() // toolCallContext not tracked in this legacy implementation
 
     override fun withToolChainingFromAny(): PromptRunner = this
 

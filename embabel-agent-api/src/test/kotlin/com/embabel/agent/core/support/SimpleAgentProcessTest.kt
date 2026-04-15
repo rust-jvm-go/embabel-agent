@@ -31,12 +31,10 @@ import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.AgentProcessStatusCode
 import com.embabel.agent.core.IoBinding
 import com.embabel.agent.core.ProcessOptions
-import com.embabel.agent.core.ReplanRequestedException
 import com.embabel.agent.core.hitl.ConfirmationRequest
 import com.embabel.agent.core.hitl.confirm
 import com.embabel.agent.core.hitl.waitFor
 import com.embabel.agent.domain.io.UserInput
-import com.embabel.agent.domain.library.Person
 import com.embabel.agent.spi.support.DefaultPlannerFactory
 import com.embabel.agent.support.Dog
 import com.embabel.agent.support.SimpleTestAgent
@@ -49,10 +47,6 @@ import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertThrows
 import java.io.IOException
-
-data class LocalPerson(
-    override val name: String,
-) : Person
 
 @com.embabel.agent.api.annotation.Agent(
     description = "waiting agent",
@@ -128,81 +122,6 @@ val DslWaitingAgent = agent("Waiter", description = "Simple test agent that wait
     }
 
     goal(name = "done", description = "done", satisfiedBy = Frog::class)
-}
-
-/**
- * Agent that throws ReplanRequestedException on first action, triggering replanning.
- * Uses blackboard state to decide whether to throw or proceed.
- */
-val ReplanningAgent = agent("Replanner", description = "Agent that triggers replanning") {
-    // Single action that either throws ReplanRequestedException or proceeds based on blackboard state
-    transformation<UserInput, LocalPerson>(name = "routing_transform") {
-        val routedTo = it["routedTo"] as? String
-        if (routedTo == "alternate") {
-            // Already routed, proceed normally
-            LocalPerson(name = "Alternate: ${it.input.content}")
-        } else {
-            // First time: throw ReplanRequestedException to trigger replanning with blackboard updates
-            throw ReplanRequestedException(
-                reason = "Routing to alternate path",
-                blackboardUpdater = { bb -> bb["routedTo"] = "alternate" }
-            )
-        }
-    }
-
-    transformation<LocalPerson, Frog>(name = "to_frog") {
-        Frog(it.input.name)
-    }
-
-    goal(name = "frog_goal", description = "Turn input into frog", satisfiedBy = Frog::class)
-}
-
-/**
- * Agent with multiple replans testing repeated replanning
- */
-val MultiReplanAgent = agent("MultiReplanner", description = "Agent that replans multiple times") {
-    transformation<UserInput, LocalPerson>(name = "counting_transform") {
-        val count = (it["replanCount"] as? Int) ?: 0
-        if (count < 3) {
-            throw ReplanRequestedException(
-                reason = "Need more replans (count=$count)",
-                blackboardUpdater = { bb -> bb["replanCount"] = count + 1 }
-            )
-        }
-        LocalPerson(name = "Finally done after $count replans: ${it.input.content}")
-    }
-
-    transformation<LocalPerson, Frog>(name = "person_to_frog") {
-        Frog(it.input.name)
-    }
-
-    goal(name = "frog_goal", description = "Turn input into frog", satisfiedBy = Frog::class)
-}
-
-/**
- * Agent to test blacklist behavior: has two actions that can both run from UserInput.
- * Action A always requests replan. Action B completes normally.
- * After A is blacklisted, B should be selected.
- */
-val BlacklistTestAgent = agent("BlacklistTester", description = "Agent that tests replan blacklist") {
-    // Action A: Always requests replan (would cause infinite loop without blacklist)
-    transformation<UserInput, LocalPerson>(name = "always_replans") {
-        throw ReplanRequestedException(
-            reason = "Always replanning",
-            blackboardUpdater = { bb -> bb["replanAttempts"] = ((bb["replanAttempts"] as? Int) ?: 0) + 1 }
-        )
-    }
-
-    // Action B: Completes normally - should be selected after A is blacklisted
-    transformation<UserInput, LocalPerson>(name = "completes_normally") {
-        LocalPerson(name = "Completed via fallback: ${it.input.content}")
-    }
-
-    transformation<LocalPerson, Frog>(name = "to_frog") {
-        Frog(it.input.name)
-    }
-
-    goal(name = "frog_goal", description = "Turn input into frog", satisfiedBy = Frog::class)
 }
 
 /**
@@ -573,6 +492,120 @@ class SimpleAgentProcessTest {
             )
         }
 
+    }
+
+    @Nested
+    inner class TerminateAgent {
+
+        /**
+         * Test subclass that exposes setStatus for testing different status scenarios.
+         */
+        private inner class TestableAgentProcess(
+            platformServices: com.embabel.agent.api.common.PlatformServices,
+        ) : SimpleAgentProcess(
+            id = "test-terminate",
+            agent = SimpleTestAgent,
+            processOptions = ProcessOptions(),
+            blackboard = InMemoryBlackboard(),
+            platformServices = platformServices,
+            plannerFactory = DefaultPlannerFactory,
+            parentId = null,
+        ) {
+            fun setStatusForTest(status: AgentProcessStatusCode) {
+                setStatus(status)
+            }
+        }
+
+        private fun createProcess(
+            status: AgentProcessStatusCode = AgentProcessStatusCode.NOT_STARTED,
+        ): TestableAgentProcess {
+            val dummyPlatformServices = dummyPlatformServices()
+            val process = TestableAgentProcess(dummyPlatformServices)
+            if (status != AgentProcessStatusCode.NOT_STARTED) {
+                process.setStatusForTest(status)
+            }
+            return process
+        }
+
+        @Test
+        fun `RUNNING status sets signal for deferred termination`() {
+            val process = createProcess(AgentProcessStatusCode.RUNNING)
+            process.terminateAgent("test reason")
+
+            // Should remain RUNNING (signal is deferred)
+            assertEquals(AgentProcessStatusCode.RUNNING, process.status)
+            // Signal should be set (checked via terminationRequest internal property)
+            assertEquals("test reason", process.terminationRequest?.reason)
+        }
+
+        @Test
+        fun `NOT_STARTED status sets signal for deferred termination`() {
+            val process = createProcess(AgentProcessStatusCode.NOT_STARTED)
+            process.terminateAgent("test reason")
+
+            // Should remain NOT_STARTED (signal is deferred)
+            assertEquals(AgentProcessStatusCode.NOT_STARTED, process.status)
+            assertEquals("test reason", process.terminationRequest?.reason)
+        }
+
+        @Test
+        fun `COMPLETED status sets TERMINATED immediately`() {
+            val process = createProcess(AgentProcessStatusCode.COMPLETED)
+            process.terminateAgent("test reason")
+
+            assertEquals(AgentProcessStatusCode.TERMINATED, process.status)
+        }
+
+        @Test
+        fun `STUCK status sets TERMINATED immediately`() {
+            val process = createProcess(AgentProcessStatusCode.STUCK)
+            process.terminateAgent("test reason")
+
+            assertEquals(AgentProcessStatusCode.TERMINATED, process.status)
+        }
+
+        @Test
+        fun `WAITING status sets TERMINATED immediately`() {
+            val process = createProcess(AgentProcessStatusCode.WAITING)
+            process.terminateAgent("test reason")
+
+            assertEquals(AgentProcessStatusCode.TERMINATED, process.status)
+        }
+
+        @Test
+        fun `PAUSED status sets TERMINATED immediately`() {
+            val process = createProcess(AgentProcessStatusCode.PAUSED)
+            process.terminateAgent("test reason")
+
+            assertEquals(AgentProcessStatusCode.TERMINATED, process.status)
+        }
+
+        @Test
+        fun `KILLED status is ignored`() {
+            val process = createProcess(AgentProcessStatusCode.KILLED)
+            process.terminateAgent("test reason")
+
+            // Should remain KILLED
+            assertEquals(AgentProcessStatusCode.KILLED, process.status)
+        }
+
+        @Test
+        fun `FAILED status is ignored`() {
+            val process = createProcess(AgentProcessStatusCode.FAILED)
+            process.terminateAgent("test reason")
+
+            // Should remain FAILED
+            assertEquals(AgentProcessStatusCode.FAILED, process.status)
+        }
+
+        @Test
+        fun `TERMINATED status is ignored`() {
+            val process = createProcess(AgentProcessStatusCode.TERMINATED)
+            process.terminateAgent("test reason")
+
+            // Should remain TERMINATED
+            assertEquals(AgentProcessStatusCode.TERMINATED, process.status)
+        }
     }
 
     @Nested

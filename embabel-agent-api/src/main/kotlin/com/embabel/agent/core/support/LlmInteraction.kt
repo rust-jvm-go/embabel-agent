@@ -18,18 +18,23 @@ package com.embabel.agent.core.support
 import com.embabel.agent.api.common.ContextualPromptElement
 import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
 import com.embabel.agent.core.ToolConsumer
 import com.embabel.agent.core.ToolGroupConsumer
 import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.agent.spi.loop.ToolInjectionStrategy
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.prompt.PromptContributor
 import com.embabel.common.ai.prompt.PromptContributorConsumer
-import com.fasterxml.jackson.annotation.JsonIgnore
 import com.embabel.common.core.MobyNameGenerator
 import com.embabel.common.core.types.HasInfoString
 import com.embabel.common.util.indent
+import com.fasterxml.jackson.annotation.JsonIgnore
 import jakarta.validation.ConstraintViolation
+import java.lang.reflect.Field
 import java.util.function.Predicate
 
 /**
@@ -46,9 +51,9 @@ interface LlmUse : PromptContributorConsumer, ToolGroupConsumer {
     val generateExamples: Boolean?
 
     /**
-     * Filter that determines which properties to include when creating objects.
+     * Filter that determines which fields to include when creating objects.
      */
-    val propertyFilter: Predicate<String>
+    val fieldFilter: Predicate<Field>
 
     /**
      * Whether to validate generated objects.
@@ -89,7 +94,7 @@ private data class LlmCallImpl(
     override val promptContributors: List<PromptContributor> = emptyList(),
     override val contextualPromptContributors: List<ContextualPromptElement> = emptyList(),
     override val generateExamples: Boolean = false,
-    override val propertyFilter: Predicate<String> = Predicate { true },
+    override val fieldFilter: Predicate<Field> = Predicate { true },
     override val validation: Boolean = true,
 ) : LlmCall
 
@@ -107,9 +112,6 @@ private data class LlmCallImpl(
  * @param llm LLM options to use, specifying model and hyperparameters
  * @param tools Tools to use for this interaction
  * @param promptContributors Prompt contributors to use for this interaction
- * @param useEmbabelToolLoop If true, use Embabel's own tool loop instead of Spring AI's.
- * This enables dynamic tool injection and gives full control over the tool execution loop.
- * Default is true.
  * @param maxToolIterations Maximum number of tool loop iterations (default 20)
  */
 data class LlmInteraction(
@@ -120,12 +122,15 @@ data class LlmInteraction(
     override val promptContributors: List<PromptContributor> = emptyList(),
     override val contextualPromptContributors: List<ContextualPromptElement> = emptyList(),
     override val generateExamples: Boolean? = null,
-    override val propertyFilter: Predicate<String> = Predicate { true },
+    override val fieldFilter: Predicate<Field> = Predicate { true },
     override val validation: Boolean = true,
-    val useEmbabelToolLoop: Boolean = true,
     val maxToolIterations: Int = 20,
     val guardRails: List<com.embabel.agent.api.validation.guardrails.GuardRail> = emptyList(),
     val additionalInjectionStrategies: List<ToolInjectionStrategy> = emptyList(),
+    val inspectors: List<ToolLoopInspector> = emptyList(),
+    val transformers: List<ToolLoopTransformer> = emptyList(),
+    val toolCallContext: ToolCallContext = ToolCallContext.EMPTY,
+    val toolNotFoundPolicy: ToolNotFoundPolicy? = null,
 ) : LlmCall {
 
     override val name: String = id.value

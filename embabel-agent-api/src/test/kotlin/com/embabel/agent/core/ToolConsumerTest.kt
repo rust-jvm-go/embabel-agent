@@ -15,12 +15,17 @@
  */
 package com.embabel.agent.core
 
+import com.embabel.agent.api.common.TerminationScope
+import com.embabel.agent.api.tool.TerminateActionException
+import com.embabel.agent.api.tool.TerminateAgentException
 import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.spi.ToolGroupResolver
+import com.embabel.agent.spi.loop.RequiredToolGroupException
 import com.embabel.agent.spi.support.RegistryToolGroupResolver
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.assertThrows
 
 /**
  * Tests for [ToolConsumer] and related interfaces.
@@ -226,6 +231,244 @@ class ToolConsumerTest {
 
             assertEquals(1, resolved.size)
             assertEquals("static-tool", resolved[0].definition.name)
+        }
+    }
+
+    @Nested
+    inner class RequiredToolGroupTest {
+
+        @Test
+        fun `throws RequiredToolGroupException when required group not found`() {
+            val resolver = createEmptyResolver()
+            val consumer = createToolConsumer(
+                name = "required-consumer",
+                tools = emptyList(),
+                toolGroups = setOf(ToolGroupRequirement("missing-role", setOf("some-tool"))),
+            )
+
+            val ex = assertThrows<RequiredToolGroupException> {
+                consumer.resolveTools(resolver)
+            }
+            assertEquals("missing-role", ex.role)
+            assertTrue(ex.message!!.contains("missing-role"))
+        }
+
+        @Test
+        fun `throws RequiredToolGroupException when required group has empty tools`() {
+            val emptyGroup = createToolGroup("empty-role", emptyList())
+            val resolver = RegistryToolGroupResolver("test", listOf(emptyGroup))
+            val consumer = createToolConsumer(
+                name = "required-empty-consumer",
+                tools = emptyList(),
+                toolGroups = setOf(ToolGroupRequirement("empty-role", setOf("some-tool"))),
+            )
+
+            val ex = assertThrows<RequiredToolGroupException> {
+                consumer.resolveTools(resolver)
+            }
+            assertEquals("empty-role", ex.role)
+            assertTrue(ex.message!!.contains("empty-role"))
+            assertTrue(ex.message!!.contains("some-tool"))
+        }
+
+        @Test
+        fun `throws RequiredToolGroupException when group is missing required tool names`() {
+            val presentTool = createMockTool("present-tool")
+            val toolGroup = createToolGroup("partial-role", listOf(presentTool))
+            val resolver = RegistryToolGroupResolver("test", listOf(toolGroup))
+            val consumer = createToolConsumer(
+                name = "partial-consumer",
+                tools = emptyList(),
+                toolGroups = setOf(ToolGroupRequirement("partial-role", setOf("present-tool", "absent-tool"))),
+            )
+
+            val ex = assertThrows<RequiredToolGroupException> {
+                consumer.resolveTools(resolver)
+            }
+            assertEquals("partial-role", ex.role)
+            assertTrue(ex.message!!.contains("absent-tool"))
+            assertTrue(ex.message!!.contains("present-tool"))
+        }
+
+        @Test
+        fun `resolves successfully when all required tool names are present`() {
+            val tool1 = createMockTool("required-tool-1")
+            val tool2 = createMockTool("required-tool-2")
+            val toolGroup = createToolGroup("full-role", listOf(tool1, tool2))
+            val resolver = RegistryToolGroupResolver("test", listOf(toolGroup))
+            val consumer = createToolConsumer(
+                name = "full-consumer",
+                tools = emptyList(),
+                toolGroups = setOf(ToolGroupRequirement("full-role", setOf("required-tool-1", "required-tool-2"))),
+            )
+
+            val resolved = consumer.resolveTools(resolver)
+
+            assertEquals(2, resolved.size)
+            assertTrue(resolved.any { it.definition.name == "required-tool-1" })
+            assertTrue(resolved.any { it.definition.name == "required-tool-2" })
+        }
+
+        @Test
+        fun `no required tool names means missing group is tolerated (backward compat)`() {
+            val resolver = createEmptyResolver()
+            val consumer = createToolConsumer(
+                name = "optional-consumer",
+                tools = emptyList(),
+                toolGroups = setOf(ToolGroupRequirement("any-role")),
+            )
+
+            val resolved = consumer.resolveTools(resolver)
+            assertTrue(resolved.isEmpty())
+        }
+
+        @Nested
+        inner class TerminationScopeTest {
+
+            @Test
+            fun `throws TerminateAgentException when required group not found and scope is AGENT`() {
+                val resolver = createEmptyResolver()
+                val consumer = createToolConsumer(
+                    name = "agent-scope-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("missing-role", setOf("some-tool"), TerminationScope.AGENT),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateAgentException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("missing-role"))
+            }
+
+            @Test
+            fun `throws TerminateActionException when required group not found and scope is ACTION`() {
+                val resolver = createEmptyResolver()
+                val consumer = createToolConsumer(
+                    name = "action-scope-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("missing-role", setOf("some-tool"), TerminationScope.ACTION),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateActionException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("missing-role"))
+            }
+
+            @Test
+            fun `throws TerminateAgentException when required group has empty tools and scope is AGENT`() {
+                val emptyGroup = createToolGroup("empty-role", emptyList())
+                val resolver = RegistryToolGroupResolver("test", listOf(emptyGroup))
+                val consumer = createToolConsumer(
+                    name = "agent-empty-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("empty-role", setOf("some-tool"), TerminationScope.AGENT),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateAgentException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("empty-role"))
+            }
+
+            @Test
+            fun `throws TerminateActionException when required group has empty tools and scope is ACTION`() {
+                val emptyGroup = createToolGroup("empty-role", emptyList())
+                val resolver = RegistryToolGroupResolver("test", listOf(emptyGroup))
+                val consumer = createToolConsumer(
+                    name = "action-empty-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("empty-role", setOf("some-tool"), TerminationScope.ACTION),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateActionException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("empty-role"))
+            }
+
+            @Test
+            fun `throws TerminateAgentException when group is missing required tool names and scope is AGENT`() {
+                val presentTool = createMockTool("present-tool")
+                val toolGroup = createToolGroup("partial-role", listOf(presentTool))
+                val resolver = RegistryToolGroupResolver("test", listOf(toolGroup))
+                val consumer = createToolConsumer(
+                    name = "agent-partial-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("partial-role", setOf("present-tool", "absent-tool"), TerminationScope.AGENT),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateAgentException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("absent-tool"))
+            }
+
+            @Test
+            fun `throws TerminateActionException when group is missing required tool names and scope is ACTION`() {
+                val presentTool = createMockTool("present-tool")
+                val toolGroup = createToolGroup("partial-role", listOf(presentTool))
+                val resolver = RegistryToolGroupResolver("test", listOf(toolGroup))
+                val consumer = createToolConsumer(
+                    name = "action-partial-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("partial-role", setOf("present-tool", "absent-tool"), TerminationScope.ACTION),
+                    ),
+                )
+
+                val ex = assertThrows<TerminateActionException> {
+                    consumer.resolveTools(resolver)
+                }
+                assertTrue(ex.reason.contains("absent-tool"))
+            }
+
+            @Test
+            fun `null scope preserves backward-compatible RequiredToolGroupException`() {
+                val resolver = createEmptyResolver()
+                val consumer = createToolConsumer(
+                    name = "null-scope-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("missing-role", setOf("some-tool"), null),
+                    ),
+                )
+
+                assertThrows<RequiredToolGroupException> {
+                    consumer.resolveTools(resolver)
+                }
+            }
+
+            @Test
+            fun `resolves successfully regardless of terminationScope when all tools present`() {
+                val tool1 = createMockTool("required-tool-1")
+                val tool2 = createMockTool("required-tool-2")
+                val toolGroup = createToolGroup("full-role", listOf(tool1, tool2))
+                val resolver = RegistryToolGroupResolver("test", listOf(toolGroup))
+                val consumer = createToolConsumer(
+                    name = "full-scope-consumer",
+                    tools = emptyList(),
+                    toolGroups = setOf(
+                        ToolGroupRequirement("full-role", setOf("required-tool-1", "required-tool-2"), TerminationScope.AGENT),
+                    ),
+                )
+
+                val resolved = consumer.resolveTools(resolver)
+
+                assertEquals(2, resolved.size)
+                assertTrue(resolved.any { it.definition.name == "required-tool-1" })
+                assertTrue(resolved.any { it.definition.name == "required-tool-2" })
+            }
         }
     }
 

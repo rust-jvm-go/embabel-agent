@@ -459,7 +459,7 @@ For more examples, see:
 
 ----
 embabel-agent-autoconfigure/models/embabel-agent-anthropic-autoconfigure/
-  src/test/kotlin/com/embabel/agent/config/models/anthropic/LLMAnthropicThinkingIT.java
+  src/test/java/com/embabel/agent/config/models/anthropic/LLMAnthropicThinkingIT.java
 ----
 ==== Relationship with Other Validation Mechanisms
 
@@ -473,3 +473,11 @@ In summary, guardrails and bean validators are complementary but distinct:
 - **Guardrails** ensure AI interactions are safe and compliant with policies
 
 Both can be enabled independently and serve different aspects of the AI safety stack.
+
+`@SecureAgentTool` is a third, orthogonal mechanism: it enforces _access control_ rather than
+content safety or data validity.
+Where guardrails ask "is this content acceptable?", `@SecureAgentTool` asks "is this principal
+allowed to invoke this agent action at all?"
+The two work well together — `@SecureAgentTool` prevents unauthorised principals from calling
+a tool, while guardrails validate the inputs and outputs of calls that are permitted.
+See xref:reference.annotations_secure_agent_tool[`@SecureAgentTool`] for details.

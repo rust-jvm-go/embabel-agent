@@ -19,14 +19,15 @@ import com.embabel.agent.api.common.*
 import com.embabel.agent.api.common.support.streaming.StreamingCapabilityDetector
 import com.embabel.agent.api.tool.ArtifactSinkingTool
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.tool.agentic.DomainToolFactory
 import com.embabel.agent.api.tool.agentic.DomainToolPredicate
 import com.embabel.agent.api.tool.agentic.DomainToolSource
 import com.embabel.agent.api.tool.agentic.DomainToolTracker
 import com.embabel.agent.api.tool.agentic.simple.DomainAwareSink
-import com.embabel.agent.spi.loop.ToolChainingInjectionStrategy
-import com.embabel.agent.spi.loop.ToolInjectionStrategy
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
 import com.embabel.agent.api.validation.guardrails.GuardRail
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
@@ -34,6 +35,9 @@ import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetTools
 import com.embabel.agent.experimental.primitive.Determination
+import com.embabel.agent.spi.loop.ToolChainingInjectionStrategy
+import com.embabel.agent.spi.loop.ToolInjectionStrategy
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.agent.spi.support.springai.streaming.StreamingChatClientOperations
 import com.embabel.chat.AssistantMessage
@@ -50,9 +54,10 @@ import com.embabel.common.core.types.ZeroToOne
 import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.loggerFor
 import com.fasterxml.jackson.databind.ObjectMapper
-import reactor.core.publisher.Flux
+import java.lang.reflect.Field
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Predicate
+import reactor.core.publisher.Flux
 
 /**
  * Default implementation of [PromptExecutionDelegate] that delegates to a [OperationContext].
@@ -68,10 +73,14 @@ internal data class OperationContextDelegate(
     override val promptContributors: List<PromptContributor>,
     private val contextualPromptContributors: List<ContextualPromptElement> = emptyList(),
     override val generateExamples: Boolean? = null,
-    override val propertyFilter: Predicate<String> = Predicate { true },
+    override val fieldFilter: Predicate<Field> = Predicate { true },
     override val validation: Boolean = true,
     private val otherTools: List<Tool> = emptyList(),
     private val guardRails: List<GuardRail> = emptyList(),
+    private val inspectors: List<ToolLoopInspector> = emptyList(),
+    private val transformers: List<ToolLoopTransformer> = emptyList(),
+    private val toolCallContext: ToolCallContext = ToolCallContext.EMPTY,
+    private val toolNotFoundPolicy: ToolNotFoundPolicy? = null,
     override val domainToolSources: List<DomainToolSource<*>> = emptyList(),
     override val autoDiscovery: Boolean = false,
     override val injectionStrategies: List<ToolInjectionStrategy> = emptyList(),
@@ -122,13 +131,25 @@ internal data class OperationContextDelegate(
     override fun withGenerateExamples(generateExamples: Boolean): PromptExecutionDelegate =
         copy(generateExamples = generateExamples)
 
-    override fun withPropertyFilter(filter: Predicate<String>): PromptExecutionDelegate =
-        copy(propertyFilter = this.propertyFilter.and(filter))
+    override fun withFieldFilter(filter: Predicate<Field>): PromptExecutionDelegate =
+        copy(fieldFilter = this.fieldFilter.and(filter))
 
     override fun withValidation(validation: Boolean): PromptExecutionDelegate = copy(validation = validation)
 
     override fun withGuardRails(vararg guards: GuardRail): PromptExecutionDelegate =
         copy(guardRails = this.guardRails + guards)
+
+    override fun withToolLoopInspectors(vararg inspectors: ToolLoopInspector): PromptExecutionDelegate =
+        copy(inspectors = this.inspectors + inspectors)
+
+    override fun withToolLoopTransformers(vararg transformers: ToolLoopTransformer): PromptExecutionDelegate =
+        copy(transformers = this.transformers + transformers)
+
+    override fun withToolCallContext(context: ToolCallContext): PromptExecutionDelegate =
+        copy(toolCallContext = this.toolCallContext.merge(context))
+
+    override fun withToolNotFoundPolicy(policy: ToolNotFoundPolicy): PromptExecutionDelegate =
+        copy(toolNotFoundPolicy = policy)
 
     override fun <T : Any> withToolChainingFrom(
         type: Class<T>,
@@ -201,10 +222,14 @@ internal data class OperationContextDelegate(
                 promptContributors = allPromptContributors,
                 id = interactionId ?: idForPrompt(outputClass),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 validation = validation,
                 guardRails = guardRails,
                 additionalInjectionStrategies = toolConfig.injectionStrategies,
+                inspectors = inspectors,
+                transformers = transformers,
+                toolCallContext = toolCallContext,
+                toolNotFoundPolicy = toolNotFoundPolicy,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -231,10 +256,14 @@ internal data class OperationContextDelegate(
                 },
                 id = interactionId ?: idForPrompt(outputClass),
                 generateExamples = generateExamples,
-                propertyFilter = propertyFilter,
+                fieldFilter = fieldFilter,
                 validation = validation,
                 guardRails = guardRails,
                 additionalInjectionStrategies = toolConfig.injectionStrategies,
+                inspectors = inspectors,
+                transformers = transformers,
+                toolCallContext = toolCallContext,
+                toolNotFoundPolicy = toolNotFoundPolicy,
             ),
             outputClass = outputClass,
             agentProcess = context.processContext.agentProcess,
@@ -343,42 +372,49 @@ internal data class OperationContextDelegate(
             },
             id = interactionId ?: InteractionId("${context.operation.name}-streaming"),
             generateExamples = generateExamples,
-            propertyFilter = propertyFilter,
+            fieldFilter = fieldFilter,
             guardRails = guardRails,
             additionalInjectionStrategies = toolConfig.injectionStrategies,
+            inspectors = inspectors,
+            transformers = transformers,
+            toolCallContext = toolCallContext,
         )
     }
 
     override fun supportsThinking(): Boolean = true
 
+    // Patterned after createObject() - uses ProcessContext flow
     override fun <T> createObjectWithThinking(
         messages: List<Message>,
         outputClass: Class<T>
     ): ThinkingResponse<T> {
-        val combinedMessages = this.messages + messages
-        val llmOperations = context.agentPlatform().platformServices.llmOperations as ChatClientLlmOperations
-        return llmOperations.doTransformWithThinking(
+        val combinedMessages = combineImagesWithMessages(this.messages + messages)
+        val interaction = thinkingInteraction(
+            toolGroups = this.toolGroups + toolGroups,
+        )
+        return context.processContext.createObjectWithThinking(
             messages = combinedMessages,
-            interaction = thinkingInteraction(),
+            interaction = interaction,
             outputClass = outputClass,
-            llmRequestEvent = null,
-            agentProcess = context.agentProcess,
+            agentProcess = context.processContext.agentProcess,
             action = action,
         )
     }
 
+    // Patterned after createObjectWithThinking() - uses ProcessContext flow
     override fun <T> createObjectIfPossibleWithThinking(
         messages: List<Message>,
         outputClass: Class<T>
     ): ThinkingResponse<T?> {
-        val llmOperations = context.agentPlatform().platformServices.llmOperations as ChatClientLlmOperations
-        val combinedMessages = this.messages + messages
-        val result = llmOperations.doTransformWithThinkingIfPossible(
+        val combinedMessages = combineImagesWithMessages(this.messages + messages)
+        val interaction = thinkingInteraction(
+            toolGroups = this.toolGroups + toolGroups,
+        )
+        val result = context.processContext.createObjectIfPossibleWithThinking(
             messages = combinedMessages,
-            interaction = thinkingInteraction(),
+            interaction = interaction,
             outputClass = outputClass,
-            llmRequestEvent = null,
-            agentProcess = context.agentProcess,
+            agentProcess = context.processContext.agentProcess,
             action = action,
         )
 
@@ -445,7 +481,9 @@ internal data class OperationContextDelegate(
         )
     }
 
-    private fun thinkingInteraction(): LlmInteraction {
+    private fun thinkingInteraction(
+        toolGroups: Set<ToolGroupRequirement> = this.toolGroups,
+    ): LlmInteraction {
         val thinkingEnabledLlm = llm.withThinking(Thinking.withExtraction())
         val toolConfig = resolveToolConfig()
         return LlmInteraction(
@@ -457,9 +495,13 @@ internal data class OperationContextDelegate(
             },
             id = interactionId ?: InteractionId("${context.operation.name}-thinking"),
             generateExamples = generateExamples,
-            propertyFilter = propertyFilter,
+            fieldFilter = fieldFilter,
+            validation = this.validation,
             guardRails = guardRails,
             additionalInjectionStrategies = toolConfig.injectionStrategies,
+            inspectors = inspectors,
+            transformers = transformers,
+            toolCallContext = toolCallContext,
         )
     }
 

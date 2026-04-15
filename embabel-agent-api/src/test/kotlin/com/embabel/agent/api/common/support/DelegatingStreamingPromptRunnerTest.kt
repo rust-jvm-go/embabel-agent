@@ -17,7 +17,9 @@ package com.embabel.agent.api.common.support
 
 import com.embabel.agent.api.common.AgentImage
 import com.embabel.agent.api.common.InteractionId
+import com.embabel.agent.api.common.TerminationScope
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
@@ -35,6 +37,7 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.assertNotNull
+import java.lang.reflect.Field
 import java.util.function.Predicate
 
 class DelegatingStreamingPromptRunnerTest {
@@ -105,14 +108,14 @@ class DelegatingStreamingPromptRunnerTest {
         }
 
         @Test
-        fun `should delegate propertyFilter property`() {
-            val filter = Predicate<String> { true }
-            every { mockDelegate.propertyFilter } returns filter
+        fun `should delegate fieldFilter property`() {
+            val filter = Predicate<Field> { true }
+            every { mockDelegate.fieldFilter } returns filter
 
             val runner = createPromptRunner()
 
-            assertEquals(filter, runner.propertyFilter)
-            verify { mockDelegate.propertyFilter }
+            assertEquals(filter, runner.fieldFilter)
+            verify { mockDelegate.fieldFilter }
         }
 
         @Test
@@ -203,6 +206,26 @@ class DelegatingStreamingPromptRunnerTest {
         }
 
         @Test
+        fun `withToolGroup with terminationScope should delegate with correct requirement`() {
+            val updatedDelegate = mockk<PromptExecutionDelegate>()
+            val groupRole = "test-group"
+
+            every { mockDelegate.withToolGroup(any<ToolGroupRequirement>()) } returns updatedDelegate
+
+            val runner = createPromptRunner()
+            val result = runner.withToolGroup(groupRole, TerminationScope.AGENT, "tool1", "tool2")
+
+            verify {
+                mockDelegate.withToolGroup(match<ToolGroupRequirement> {
+                    it.role == groupRole &&
+                        it.requiredToolNames == setOf("tool1", "tool2") &&
+                        it.terminationScope == TerminationScope.AGENT
+                })
+            }
+            assertTrue(result is DelegatingStreamingPromptRunner)
+        }
+
+        @Test
         fun `withToolGroup ToolGroup should delegate`() {
             val updatedDelegate = mockk<PromptExecutionDelegate>()
             val toolGroup = mockk<ToolGroup>()
@@ -269,6 +292,21 @@ class DelegatingStreamingPromptRunnerTest {
 
             verify { mockDelegate.withGenerateExamples(true) }
             assertTrue(result is DelegatingStreamingPromptRunner)
+        }
+
+        @Test
+        fun `withToolCallContext should delegate and wrap result`() {
+            val updatedDelegate = mockk<PromptExecutionDelegate>()
+            val ctx = ToolCallContext.of("tenantId" to "acme")
+
+            every { mockDelegate.withToolCallContext(ctx) } returns updatedDelegate
+
+            val runner = createPromptRunner()
+            val result = runner.withToolCallContext(ctx)
+
+            verify { mockDelegate.withToolCallContext(ctx) }
+            assertTrue(result is DelegatingStreamingPromptRunner)
+            assertEquals(updatedDelegate, (result as DelegatingStreamingPromptRunner).delegate)
         }
     }
 

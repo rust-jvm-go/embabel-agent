@@ -15,6 +15,7 @@
  */
 package com.embabel.agent.spi.support
 
+import com.embabel.agent.api.common.Asyncer
 import com.embabel.agent.api.event.LlmRequestEvent
 import com.embabel.agent.api.tool.Tool
 import com.embabel.agent.core.Action
@@ -33,15 +34,19 @@ import com.embabel.common.ai.model.AutoModelSelectionCriteria
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.ai.model.ModelSelectionCriteria
+import com.embabel.common.ai.model.PreResolvedModelSelectionCriteria
+import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.util.time
+import jakarta.validation.ConstraintViolation
 import jakarta.validation.Validator
-import org.slf4j.Logger
-import org.slf4j.LoggerFactory
+import java.lang.reflect.Field
 import java.time.Duration
-import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
+import java.util.function.Predicate
+import org.slf4j.Logger
+import org.slf4j.LoggerFactory
 
 // Log message constants to avoid duplication
 private const val LLM_TIMEOUT_MESSAGE = "LLM {}: attempt {} timed out after {}ms"
@@ -61,6 +66,7 @@ abstract class AbstractLlmOperations(
     private val autoLlmSelectionCriteriaResolver: AutoLlmSelectionCriteriaResolver,
     protected val dataBindingProperties: LlmDataBindingProperties,
     protected val promptsProperties: LlmOperationsPromptsProperties = LlmOperationsPromptsProperties(),
+    protected val asyncer: Asyncer,
 ) : LlmOperations {
 
     protected val logger: Logger = LoggerFactory.getLogger(javaClass)
@@ -90,7 +96,7 @@ abstract class AbstractLlmOperations(
     ): T {
         val timeoutMillis = getTimeoutMillis(llmOptions)
 
-        val future = CompletableFuture.supplyAsync { operation() }
+        val future = asyncer.async(operation)
 
         return try {
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
@@ -111,8 +117,7 @@ abstract class AbstractLlmOperations(
             )
         } catch (e: ExecutionException) {
             future.cancel(true)
-            val cause = e.cause
-            when (cause) {
+            when (val cause = e.cause) {
                 is RuntimeException -> throw cause
                 is Exception -> throw RuntimeException(
                     "LLM call for interaction $interactionId failed",
@@ -161,6 +166,7 @@ abstract class AbstractLlmOperations(
                         validationPromptGenerator.generateRequirementsPrompt(
                             validator = validator,
                             outputClass = outputClass,
+                            fieldFilter = interaction.fieldFilter,
                         )
                     )
                 } else {
@@ -185,6 +191,8 @@ abstract class AbstractLlmOperations(
                 }
             if (interaction.validation) {
                 var constraintViolations = validator.validate(candidate)
+                constraintViolations =
+                    filterConstraintViolations(constraintViolations, outputClass, interaction.fieldFilter)
                 if (constraintViolations.isNotEmpty()) {
                     // If we had violations, try again, once, before throwing an exception
                     candidate = dataBindingProperties.retryTemplate(interaction.id.value)
@@ -206,6 +214,8 @@ abstract class AbstractLlmOperations(
                             }
                         }
                     constraintViolations = validator.validate(candidate)
+                    constraintViolations =
+                        filterConstraintViolations(constraintViolations, outputClass, interaction.fieldFilter)
                     if (constraintViolations.isNotEmpty()) {
                         throw InvalidLlmReturnTypeException(
                             returnedObject = candidate as Any,
@@ -216,7 +226,7 @@ abstract class AbstractLlmOperations(
             }
             candidate
         }
-        logger.debug("LLM response={}", createdObject)
+        logger.debug("LLM createdObject response={}", createdObject)
         agentProcess.processContext.onProcessEvent(
             llmRequestEvent.responseEvent(
                 response = createdObject,
@@ -225,6 +235,17 @@ abstract class AbstractLlmOperations(
         )
         return createdObject
     }
+
+    private fun <O> filterConstraintViolations(
+        constraintViolations: Set<ConstraintViolation<O>>,
+        outputClass: Class<O>,
+        fieldFilter: Predicate<Field>,
+    ): Set<ConstraintViolation<O>> =
+        constraintViolations.filterTo(mutableSetOf()) { violation ->
+            runCatching { outputClass.getDeclaredField(violation.propertyPath.toString()) }
+                .map { fieldFilter.test(it) }
+                .getOrDefault(true)
+        }
 
     final override fun <O> createObjectIfPossible(
         messages: List<Message>,
@@ -240,24 +261,141 @@ abstract class AbstractLlmOperations(
             messages = messages,
             outputClass = outputClass,
         )
+
+        val interactionWithToolDecoration = interaction.copy(
+            tools = allTools.map {
+                toolDecorator.decorate(
+                    tool = it,
+                    agentProcess = agentProcess,
+                    action = action,
+                    llmOptions = interaction.llm,
+                )
+            }
+        )
+
         val (response, ms) = time {
-            doTransformIfPossible(
-                messages = messages,
-                interaction = interaction.copy(tools = allTools.map {
-                    toolDecorator.decorate(
-                        tool = it,
-                        agentProcess = agentProcess,
-                        action = action,
+            dataBindingProperties.retryTemplate(interaction.id.value)
+                .execute<Result<O>, Exception> {
+                    executeWithTimeout(
+                        interactionId = interaction.id.value,
                         llmOptions = interaction.llm,
-                    )
-                }),
-                outputClass = outputClass,
-                llmRequestEvent = llmRequestEvent,
-            )
+                    ) {
+                        doTransformIfPossible(
+                            messages = messages,
+                            interaction = interactionWithToolDecoration,
+                            outputClass = outputClass,
+                            llmRequestEvent = llmRequestEvent,
+                        )
+                    }
+                }
         }
-        logger.debug("LLM response={}", response)
+        logger.debug("LLM createObjectIfPossible response={}", response)
         agentProcess.processContext.onProcessEvent(
             llmRequestEvent.maybeResponseEvent(
+                response = response,
+                runningTime = Duration.ofMillis(ms),
+            ),
+        )
+        return response
+    }
+
+    final override fun <O> createObjectWithThinking(
+        messages: List<Message>,
+        interaction: LlmInteraction,
+        outputClass: Class<O>,
+        agentProcess: AgentProcess,
+        action: Action?,
+    ): ThinkingResponse<O> {
+        val (allTools, llmRequestEvent) = getToolsAndEvent(
+            agentProcess = agentProcess,
+            interaction = interaction,
+            action = action,
+            messages = messages,
+            outputClass = outputClass,
+        )
+
+        val interactionWithToolDecoration = interaction.copy(
+            tools = allTools.map {
+                toolDecorator.decorate(
+                    tool = it,
+                    agentProcess = agentProcess,
+                    action = action,
+                    llmOptions = interaction.llm,
+                )
+            }
+        )
+
+        val (thinkingResponse, ms) = time {
+            dataBindingProperties.retryTemplate(interaction.id.value)
+                .execute<ThinkingResponse<O>, Exception> {
+                    executeWithTimeout(
+                        interactionId = interaction.id.value,
+                        llmOptions = interaction.llm,
+                    ) {
+                        doTransformWithThinking(
+                            messages = messages,
+                            interaction = interactionWithToolDecoration,
+                            outputClass = outputClass,
+                            llmRequestEvent = llmRequestEvent,
+                        )
+                    }
+                }
+        }
+        logger.debug("LLM thinking response={}", thinkingResponse)
+        agentProcess.processContext.onProcessEvent(
+            llmRequestEvent.thinkingResponseEvent(
+                response = thinkingResponse,
+                runningTime = Duration.ofMillis(ms),
+            ),
+        )
+        return thinkingResponse
+    }
+
+    final override fun <O> createObjectIfPossibleWithThinking(
+        messages: List<Message>,
+        interaction: LlmInteraction,
+        outputClass: Class<O>,
+        agentProcess: AgentProcess,
+        action: Action?,
+    ): Result<ThinkingResponse<O>> {
+        val (allTools, llmRequestEvent) = getToolsAndEvent(
+            agentProcess = agentProcess,
+            interaction = interaction,
+            action = action,
+            messages = messages,
+            outputClass = outputClass,
+        )
+
+        val interactionWithToolDecoration = interaction.copy(
+            tools = allTools.map {
+                toolDecorator.decorate(
+                    tool = it,
+                    agentProcess = agentProcess,
+                    action = action,
+                    llmOptions = interaction.llm,
+                )
+            }
+        )
+
+        val (response, ms) = time {
+            dataBindingProperties.retryTemplate(interaction.id.value)
+                .execute<Result<ThinkingResponse<O>>, Exception> {
+                    executeWithTimeout(
+                        interactionId = interaction.id.value,
+                        llmOptions = interaction.llm,
+                    ) {
+                        doTransformWithThinkingIfPossible(
+                            messages = messages,
+                            interaction = interactionWithToolDecoration,
+                            outputClass = outputClass,
+                            llmRequestEvent = llmRequestEvent,
+                        )
+                    }
+                }
+        }
+        logger.debug("LLM createObjectIfPossibleWithThinking response={}", response)
+        agentProcess.processContext.onProcessEvent(
+            llmRequestEvent.maybeThinkingResponseEvent(
                 response = response,
                 runningTime = Duration.ofMillis(ms),
             ),
@@ -273,6 +411,10 @@ abstract class AbstractLlmOperations(
                 autoLlmSelectionCriteriaResolver.resolveAutoLlm()
 
             else -> llmOptions.criteria
+        }
+        if (crit is PreResolvedModelSelectionCriteria<*>) {
+            @Suppress("UNCHECKED_CAST")
+            return crit.resolved as LlmService<*>
         }
         return modelProvider.getLlm(crit)
     }
@@ -298,7 +440,7 @@ abstract class AbstractLlmOperations(
             action = action,
             outputClass = outputClass,
             interaction = interaction.copy(tools = allTools),
-            llmMetadata = chooseLlm(llmOptions = interaction.llm),
+            llmMetadata = chooseLlm(interaction.llm),
             messages = messages,
         )
         agentProcess.processContext.onProcessEvent(llmRequestEvent)

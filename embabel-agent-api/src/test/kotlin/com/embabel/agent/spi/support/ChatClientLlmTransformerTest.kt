@@ -25,9 +25,10 @@ import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.LlmInvocation
 import com.embabel.agent.core.LlmInvocationHistory
 import com.embabel.agent.core.ProcessContext
+import com.embabel.agent.core.ProcessOptions
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
-import com.embabel.agent.spi.support.springai.MaybeReturn
+import com.embabel.agent.spi.support.MaybeReturn
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.agent.test.common.EventSavingAgenticEventListener
 import com.embabel.chat.UserMessage
@@ -158,6 +159,7 @@ class ChatClientLlmTransformerTest {
             val mockProcessContext = mockk<ProcessContext>()
             every { mockProcessContext.onProcessEvent(any()) } answers { eventListener.onProcessEvent(firstArg()) }
             every { mockProcessContext.platformServices } returns mockPlatformServices
+            every { mockProcessContext.processOptions } returns ProcessOptions()
             every { mockProcessContext.agentProcess } returns mockAgentProcess
             every { mockAgentProcess.processContext } returns mockProcessContext
 
@@ -184,6 +186,7 @@ class ChatClientLlmTransformerTest {
                 toolDecorator = DefaultToolDecorator(),
                 validator = Validation.buildDefaultValidatorFactory().validator,
                 templateRenderer = JinjavaTemplateRenderer(),
+                asyncer = ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
             )
             return transformer.createObject(
                 messages = listOf(UserMessage("Say hello")),
@@ -229,7 +232,8 @@ class ChatClientLlmTransformerTest {
                     outputClass = SpiPerson::class.java,
                 )
                 assertEquals(Result.success(person), result.result)
-                assertEquals(3, ese.processEvents.size)
+                // Embabel tool loop emits: LlmRequestEvent, ToolLoopStartEvent, ToolLoopCompletedEvent, LlmMaybeResponseEvent + ChatModelCallEvent
+                assertEquals(5, ese.processEvents.size)
             }
 
             @Test
@@ -337,6 +341,7 @@ class ChatClientLlmTransformerTest {
             val mockProcessContext = mockk<ProcessContext>()
             every { mockProcessContext.onProcessEvent(any()) } answers { eventListener.onProcessEvent(firstArg()) }
             every { mockProcessContext.platformServices } returns mockPlatformServices
+            every { mockProcessContext.processOptions } returns ProcessOptions()
             every { mockProcessContext.agentProcess } returns mockAgentProcess
             every { mockAgentProcess.processContext } returns mockProcessContext
             every { mockAgentProcess.recordLlmInvocation(any()) } answers {
@@ -369,6 +374,7 @@ class ChatClientLlmTransformerTest {
                     toolDecorator = DefaultToolDecorator(),
                     templateRenderer = JinjavaTemplateRenderer(),
                     validator = Validation.buildDefaultValidatorFactory().validator,
+                    asyncer = ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
                 )
             val result = transformer.createObjectIfPossible(
                 messages = listOf(UserMessage("Say hello")),

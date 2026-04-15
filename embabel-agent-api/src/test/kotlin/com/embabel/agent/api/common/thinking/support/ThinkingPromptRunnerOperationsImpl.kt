@@ -59,7 +59,7 @@ internal class ThinkingPromptRunnerOperationsImpl(
         outputClass: Class<T>,
     ): ThinkingResponse<T?> {
         val combinedMessages = this.messages + messages
-        val result = chatClientOperations.doTransformWithThinkingIfPossible(
+        val result = chatClientOperations.doTransformWithThinkingIfPossibleSpringAi(
             messages = combinedMessages,
             interaction = interaction,
             outputClass = outputClass,
@@ -98,7 +98,7 @@ internal class ThinkingPromptRunnerOperationsImpl(
         outputClass: Class<T>,
     ): ThinkingResponse<T> {
         val combinedMessages = this.messages + messages
-        return chatClientOperations.doTransformWithThinking(
+        return chatClientOperations.doTransformWithThinkingSpringAi(
             messages = combinedMessages,
             interaction = interaction,
             outputClass = outputClass,

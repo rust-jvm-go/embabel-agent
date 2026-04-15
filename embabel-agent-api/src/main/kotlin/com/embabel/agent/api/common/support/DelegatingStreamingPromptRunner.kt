@@ -21,13 +21,17 @@ import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.common.PromptRunner
 import com.embabel.agent.api.common.streaming.StreamingPromptRunner
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolCallContext
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.tool.agentic.DomainToolPredicate
+import com.embabel.agent.api.tool.callback.ToolLoopInspector
+import com.embabel.agent.api.tool.callback.ToolLoopTransformer
 import com.embabel.agent.api.validation.guardrails.GuardRail
-import com.embabel.agent.spi.loop.ToolInjectionStrategy
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.ToolGroupRequirement
 import com.embabel.agent.experimental.primitive.Determination
+import com.embabel.agent.spi.loop.ToolInjectionStrategy
+import com.embabel.agent.spi.loop.ToolNotFoundPolicy
 import com.embabel.chat.AssistantMessage
 import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
@@ -35,6 +39,8 @@ import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.prompt.PromptContributor
 import com.embabel.common.core.types.ZeroToOne
 import com.embabel.common.util.loggerFor
+import java.lang.reflect.Field
+import java.util.function.Predicate
 
 /**
  * Implementation of [StreamingPromptRunner] that delegates to a [PromptExecutionDelegate].
@@ -59,8 +65,8 @@ internal data class DelegatingStreamingPromptRunner(
     override val generateExamples: Boolean?
         get() = delegate.generateExamples
 
-    override val propertyFilter: java.util.function.Predicate<String>
-        get() = delegate.propertyFilter
+    override val fieldFilter: Predicate<Field>
+        get() = delegate.fieldFilter
 
     override val validation: Boolean
         get() = delegate.validation
@@ -111,8 +117,8 @@ internal data class DelegatingStreamingPromptRunner(
         copy(delegate = delegate.withGenerateExamples(generateExamples))
 
     @Deprecated("Use creating().withPropertyFilter() instead")
-    override fun withPropertyFilter(filter: java.util.function.Predicate<String>): PromptRunner =
-        copy(delegate = delegate.withPropertyFilter(filter))
+    override fun withPropertyFilter(filter: Predicate<String>): PromptRunner =
+        copy(delegate = delegate.withFieldFilter { filter.test(it.name) })
 
     @Deprecated("Use creating().withValidation() instead")
     override fun withValidation(validation: Boolean): PromptRunner =
@@ -120,6 +126,18 @@ internal data class DelegatingStreamingPromptRunner(
 
     override fun withGuardRails(vararg guards: GuardRail): PromptRunner =
         copy(delegate = delegate.withGuardRails(*guards))
+
+    override fun withToolLoopInspectors(vararg inspectors: ToolLoopInspector): PromptRunner =
+        copy(delegate = delegate.withToolLoopInspectors(*inspectors))
+
+    override fun withToolLoopTransformers(vararg transformers: ToolLoopTransformer): PromptRunner =
+        copy(delegate = delegate.withToolLoopTransformers(*transformers))
+
+    override fun withToolCallContext(context: ToolCallContext): PromptRunner =
+        copy(delegate = delegate.withToolCallContext(context))
+
+    override fun withToolNotFoundPolicy(policy: ToolNotFoundPolicy): PromptRunner =
+        copy(delegate = delegate.withToolNotFoundPolicy(policy))
 
     override fun <T : Any> withToolChainingFrom(
         type: Class<T>,
