@@ -1,5 +1,7 @@
 
 embabel-agent-api/src/main/resources/mcp/**
+embabel-agent-docs/target/**
+embabel-agent-docs/venv/**
 
 .idea
 
