@@ -56,7 +56,8 @@ object InMemoryPropertyFilter {
 
     /**
      * Test if an object matches a [PropertyFilter] using reflection.
-     * Supports both [PropertyFilter] leaf types and [EntityFilter].
+     * Supports both [PropertyFilter] leaf types and [EntityFilter]. Entity filters leave
+     * non-[NamedEntityData] targets unchanged because they are outside the filter's scope.
      */
     fun matchesObject(filter: PropertyFilter, target: Any): Boolean {
         if (target is NamedEntityData) {
@@ -65,7 +66,7 @@ object InMemoryPropertyFilter {
 
         // For other objects, use reflection to build a properties map
         return when (filter) {
-            is EntityFilter -> false // Entity filters only apply to NamedEntityData
+            is EntityFilter -> true // Non-entity targets are outside the filter's scope
             else -> GenericPropertyFilter.matches(filter, extractProperties(target))
         }
     }
@@ -111,6 +112,7 @@ object InMemoryPropertyFilter {
         results: List<SimilarityResult<T>>,
         metadataFilter: PropertyFilter?,
         entityFilter: PropertyFilter?,
+        entitiesOnly: Boolean = false,
     ): List<SimilarityResult<T>> where T : Datum, T : Retrievable {
         var filtered = results
 
@@ -120,6 +122,10 @@ object InMemoryPropertyFilter {
 
         if (entityFilter != null) {
             filtered = filtered.filter { matchesObject(entityFilter, it.match) }
+        }
+
+        if (entitiesOnly) {
+            filtered = filtered.filter { it.match is NamedEntityData }
         }
 
         return filtered

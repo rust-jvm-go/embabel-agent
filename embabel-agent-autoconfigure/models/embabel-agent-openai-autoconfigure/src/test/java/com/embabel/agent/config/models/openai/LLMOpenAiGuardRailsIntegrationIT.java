@@ -25,42 +25,44 @@ import com.embabel.agent.api.validation.guardrails.UserInputGuardRail;
 import com.embabel.agent.autoconfigure.models.openai.AgentOpenAiAutoConfiguration;
 import com.embabel.agent.core.Blackboard;
 import com.embabel.agent.spi.LlmService;
+import com.embabel.common.ai.model.DefaultModelSelectionCriteria;
+import com.embabel.common.ai.model.LlmOptions;
+import com.embabel.common.ai.model.NativeStructuredOutputMode;
 import com.embabel.common.core.thinking.ThinkingBlock;
 import com.embabel.common.core.thinking.ThinkingResponse;
 import com.embabel.common.core.validation.ValidationError;
 import com.embabel.common.core.validation.ValidationResult;
 import com.embabel.common.core.validation.ValidationSeverity;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.openai.client.OpenAIClient;
 import com.openai.client.okhttp.OpenAIOkHttpClient;
 import com.openai.models.moderations.ModerationCreateParams;
 import com.openai.models.moderations.ModerationCreateResponse;
 import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.ai.model.SimpleApiKey;
 import org.springframework.ai.moderation.Moderation;
 import org.springframework.ai.moderation.ModerationPrompt;
 import org.springframework.ai.moderation.ModerationResponse;
 import org.springframework.ai.openai.OpenAiModerationModel;
-import org.springframework.ai.openai.api.OpenAiModerationApi;
 import org.springframework.ai.tool.annotation.Tool;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
+import org.springframework.boot.SpringBootConfiguration;
+import org.springframework.boot.autoconfigure.EnableAutoConfiguration;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
-import org.springframework.util.LinkedMultiValueMap;
-import org.springframework.web.client.DefaultResponseErrorHandler;
-import org.springframework.web.client.RestClient;
 
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+import static com.embabel.common.ai.model.NativeStructuredOutputModeKt.withNativeStructuredOutput;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -261,20 +263,19 @@ class GuardRailConfiguration {
     }
 
     //  SPRING OPEN AI Moderation88
+    //
+    // Spring AI 2.0 removed OpenAiModerationApi (alongside OpenAiApi) and now
+    // routes moderation through the openai-java SDK's OpenAIClient via
+    // OpenAiModerationModel.builder(). We build a sync OpenAIClient inline so
+    // this config no longer needs to wire a separate `OpenAiModerationApi` bean.
     @Bean
-    public OpenAiModerationApi openAiModerationApi() {
-        return new OpenAiModerationApi(
-                "https://api.openai.com",
-                new SimpleApiKey(System.getenv("OPENAI_API_KEY")),
-                new LinkedMultiValueMap<>(),
-                RestClient.builder(),
-                new DefaultResponseErrorHandler()
-        );
-    }
-
-    @Bean
-    public OpenAiModerationModel openAiModerationModel(OpenAiModerationApi openAiModerationApi) {
-        return new OpenAiModerationModel(openAiModerationApi);
+    public OpenAiModerationModel openAiModerationModel() {
+        OpenAIClient client = OpenAIOkHttpClient.builder()
+                .apiKey(System.getenv("OPENAI_API_KEY"))
+                .build();
+        return OpenAiModerationModel.builder()
+                .openAiClient(client)
+                .build();
     }
 
     @Bean
@@ -293,6 +294,7 @@ class GuardRailConfiguration {
  * Tests integration with OpenAI Moderation API as a guardrail provider.
  */
 @SpringBootTest(
+        classes = LLMOpenAiGuardRailsIntegrationIT.TestApplication.class,
         properties = {
                 "embabel.models.cheapest=gpt-4.1-mini",
                 "embabel.models.best=gpt-4.1-mini",
@@ -324,12 +326,6 @@ class GuardRailConfiguration {
         }
 )
 @ActiveProfiles("thinking")
-@ConfigurationPropertiesScan(
-        basePackages = {
-                "com.embabel.agent",
-                "com.embabel.example"
-        }
-)
 @ComponentScan(
         basePackages = {
                 "com.embabel.agent",
@@ -343,7 +339,14 @@ class GuardRailConfiguration {
         }
 )
 @Import({AgentOpenAiAutoConfiguration.class, GuardRailConfiguration.class})
+@EnabledIfEnvironmentVariable(named = "OPENAI_API_KEY", matches = ".+",
+        disabledReason = "Integration test requires OPENAI_API_KEY")
 class LLMOpenAiGuardRailsIntegrationIT {
+
+    @SpringBootConfiguration
+    @EnableAutoConfiguration
+    static class TestApplication {
+    }
 
 
     private static final Logger logger = LoggerFactory.getLogger(LLMOpenAiGuardRailsIntegrationIT.class);
@@ -372,6 +375,7 @@ class LLMOpenAiGuardRailsIntegrationIT {
                 .withToolObject(new Tooling())
                 .withGenerateExamples(true)
                 .withGuardRails(openAiGuardRail, new ThinkingBlocksGuardRail());
+        assertTrue(runner.supportsThinking(), "Expected OpenAI prompt runner to support thinking");
 
         String prompt = """
                 What is the hottest month in Florida and  provide its temperature.
@@ -401,6 +405,7 @@ class LLMOpenAiGuardRailsIntegrationIT {
                 .withToolObject(new Tooling())
                 .withGuardRails(springAiGuardRail)
                 .withGuardRails(new ThinkingBlocksGuardRail());
+        assertTrue(runner.supportsThinking(), "Expected OpenAI prompt runner to support thinking");
 
         String prompt = """ 
                 Think about the coldest month in Alaska and its temperature.
@@ -440,8 +445,10 @@ class LLMOpenAiGuardRailsIntegrationIT {
      * Simple data class for testing thinking object creation
      */
     static class MonthItem {
+        @JsonProperty(required = true)
         private String name;
 
+        @JsonProperty(required = true)
         private Integer temperature;
 
         public MonthItem() {
@@ -597,7 +604,7 @@ class LLMOpenAiGuardRailsIntegrationIT {
      * that previously skipped guardrail validation for non-String/non-AssistantMessage types.
      */
     @Test
-    void testGuardRailInvokedForStructuredCreateObject() {
+    void testGuardRailInvokedForNativeStructuredCreateObject() {
         logger.info("Starting guardrail structured createObject test");
 
         List<String> guardRailCalled = Collections.synchronizedList(new ArrayList<>());
@@ -626,7 +633,12 @@ class LLMOpenAiGuardRailsIntegrationIT {
             }
         };
 
-        PromptRunner runner = ai.withDefaultLlm()
+        PromptRunner runner = ai.withLlm(
+                withNativeStructuredOutput(
+                        LlmOptions.fromCriteria(DefaultModelSelectionCriteria.INSTANCE),
+                        NativeStructuredOutputMode.ENABLED
+                )
+        )
                 .withGuardRails(trackingGuard);
 
         String prompt = """

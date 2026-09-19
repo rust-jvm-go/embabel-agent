@@ -17,6 +17,8 @@ include::rag/page.adoc[]
 include::chatbots/page.adoc[]
 
 include::agent-process/page.adoc[]
+include::persistence/page.adoc[]
+include::cache/page.adoc[]
 include::agent-platform/page.adoc[]
 
 include::invoking/page.adoc[]
@@ -34,6 +36,10 @@ include::llms/page.adoc[]
 include::bedrock/page.adoc[]
 
 include::minimax/page.adoc[]
+
+include::zai/page.adoc[]
+
+include::dashscope/page.adoc[]
 
 include::streaming/page.adoc[]
 

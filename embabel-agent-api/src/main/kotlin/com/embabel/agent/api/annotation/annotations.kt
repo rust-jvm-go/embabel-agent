@@ -18,6 +18,7 @@ package com.embabel.agent.api.annotation
 import com.embabel.agent.api.common.PlannerType
 import com.embabel.agent.core.IoBinding
 import com.embabel.agent.core.ActionRetryPolicy
+import com.embabel.agent.core.Delay
 import com.embabel.common.core.types.Semver.Companion.DEFAULT_VERSION
 import com.embabel.common.core.types.ZeroToOne
 import org.springframework.core.annotation.AliasFor
@@ -47,7 +48,7 @@ annotation class EmbabelComponent(
  * It doesn't just contribute actions, goals and conditions:
  * it is an agent in itself.
  * This is a Spring stereotype annotation, so annotated classes will be picked up on the classpath and injected
- * Either @Agent or @AgentCapabilities should be used: not both
+ * Use either @Agent or @EmbabelComponent, not both.
  * @param name Name of the agent. If not provided, the name will be the class simple name
  * @param provider provider of the agent. If not provided, will default to the package this annotation is used in
  * @param description Description of the agent. Required. This is used for documentation purposes and to choose an agent
@@ -87,6 +88,7 @@ annotation class Agent(
     val opaque: Boolean = false,
     val actionRetryPolicy: ActionRetryPolicy = ActionRetryPolicy.DEFAULT,
     val actionRetryPolicyExpression: String = "",
+    val delay: Delay = Delay.UNSET,
 )
 
 /**
@@ -210,6 +212,7 @@ annotation class Action(
     val trigger: KClass<*> = Unit::class,
     val actionRetryPolicy: ActionRetryPolicy = ActionRetryPolicy.DEFAULT,
     val actionRetryPolicyExpression: String = "",
+    val delayMs: Long = -1L,
 )
 
 /**

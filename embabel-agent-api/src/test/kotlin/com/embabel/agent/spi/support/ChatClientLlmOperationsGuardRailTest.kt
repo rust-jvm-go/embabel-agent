@@ -13,12 +13,15 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.annotation.support.Wumpus
 import com.embabel.agent.api.common.InteractionId
 import com.embabel.agent.api.common.ToolsStats
 import com.embabel.agent.api.event.LlmRequestEvent
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.api.tool.ToolObject
 import com.embabel.agent.api.validation.guardrails.AssistantMessageGuardRail
 import com.embabel.agent.api.validation.guardrails.GuardRailViolationException
@@ -28,7 +31,6 @@ import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.core.support.LlmInteraction
 import com.embabel.agent.core.support.safelyGetToolsFrom
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
-import com.embabel.agent.spi.support.MaybeReturn
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
 import com.embabel.agent.spi.validation.DefaultValidationPromptGenerator
 import com.embabel.agent.support.SimpleTestAgent
@@ -43,8 +45,8 @@ import com.embabel.common.core.validation.ValidationLocation
 import com.embabel.common.core.validation.ValidationResult
 import com.embabel.common.core.validation.ValidationSeverity
 import com.embabel.common.textio.template.JinjavaTemplateRenderer
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.embabel.common.util.EmbabelObjectMapperHolder
+import tools.jackson.module.kotlin.jacksonObjectMapper
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.slot
@@ -55,7 +57,6 @@ import org.springframework.ai.chat.model.ChatModel
 import org.springframework.ai.chat.model.ChatResponse
 import org.springframework.ai.chat.model.Generation
 import org.springframework.ai.chat.prompt.ChatOptions
-import org.springframework.ai.chat.prompt.DefaultChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.ai.model.tool.ToolCallingChatOptions
 import org.springframework.ai.chat.messages.AssistantMessage as SpringAssistantMessage
@@ -65,12 +66,14 @@ import org.springframework.ai.chat.messages.AssistantMessage as SpringAssistantM
  */
 class GuardRailTestFakeChatModel(
     val responses: List<String>,
-    private val options: ChatOptions = DefaultChatOptions(),
+    // Spring AI 2.0: ChatClient merges via getOptions; use ToolCallingChatOptions
+    // so the subtype survives the merge into the final Prompt.
+    private val options: ChatOptions = ToolCallingChatOptions.builder().build(),
 ) : ChatModel {
 
     constructor(
         response: String,
-        options: ChatOptions = DefaultChatOptions(),
+        options: ChatOptions = ToolCallingChatOptions.builder().build(),
     ) : this(
         listOf(response), options
     )
@@ -82,7 +85,7 @@ class GuardRailTestFakeChatModel(
     val promptsPassed = mutableListOf<Prompt>()
     val optionsPassed = mutableListOf<ToolCallingChatOptions>()
 
-    override fun getDefaultOptions(): ChatOptions = options
+    override fun getOptions(): ChatOptions = options
 
     override fun call(prompt: Prompt): ChatResponse {
         promptsPassed.add(prompt)
@@ -152,7 +155,7 @@ class ChatClientLlmOperationsGuardRailTest {
             validator = Validation.buildDefaultValidatorFactory().validator,
             validationPromptGenerator = DefaultValidationPromptGenerator(),
             templateRenderer = JinjavaTemplateRenderer(),
-            objectMapper = jacksonObjectMapper().registerModule(JavaTimeModule()),
+            embabelObjectMapperHolder = EmbabelObjectMapperHolder.createDefault(),
             dataBindingProperties = dataBindingProperties,
             asyncer = ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
         )

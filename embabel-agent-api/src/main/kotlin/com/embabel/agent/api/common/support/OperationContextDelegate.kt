@@ -16,6 +16,7 @@
 package com.embabel.agent.api.common.support
 
 import com.embabel.agent.api.common.*
+import com.embabel.agent.spi.support.streaming.InternalStreamingApi
 import com.embabel.agent.spi.support.streaming.StreamingCapabilityDetector
 import com.embabel.agent.api.tool.ArtifactSinkingTool
 import com.embabel.agent.api.tool.Tool
@@ -53,7 +54,7 @@ import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.core.types.ZeroToOne
 import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.loggerFor
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import java.lang.reflect.Field
 import java.util.concurrent.atomic.AtomicLong
 import java.util.function.Predicate
@@ -325,6 +326,7 @@ internal data class OperationContextDelegate(
         }
     }
 
+    @OptIn(InternalStreamingApi::class)
     override fun supportsStreaming(): Boolean {
         val llmOperations = context.agentPlatform().platformServices.llmOperations
         return StreamingCapabilityDetector.supportsStreaming(llmOperations, this.llm)
@@ -412,7 +414,10 @@ internal data class OperationContextDelegate(
             )
     }
 
-    override fun supportsThinking(): Boolean = true
+    override fun supportsThinking(): Boolean {
+        val llmOperations = context.agentPlatform().platformServices.llmOperations
+        return llmOperations.supportsThinking(this.llm)
+    }
 
     // Patterned after createObject() - uses ProcessContext flow
     override fun <T> createObjectWithThinking(
@@ -515,15 +520,24 @@ internal data class OperationContextDelegate(
     private fun thinkingInteraction(
         toolGroups: Set<ToolGroupRequirement> = this.toolGroups,
     ): LlmInteraction {
-        val thinkingEnabledLlm = llm.withThinking(Thinking.withExtraction())
+        val thinkingEnabledLlm = llm.withThinking(
+            (llm.thinking ?: Thinking.withExtraction()).applyExtraction()
+        )
+        val thinking = thinkingEnabledLlm.thinking
+        // Inject a system prompt hint so the model knows which tag to use for reasoning.
+        // Placed after the agent identity prompt but before contextual contributors.
+        val tagHintContributor = thinking?.includedTags
+            ?.takeIf { thinking.injectSystemPrompt }
+            ?.first()
+            ?.let { tag -> PromptContributor.fixed("You must provide your reasoning wrapped in <$tag></$tag> tags.") }
         val toolConfig = resolveToolConfig()
         return LlmInteraction(
             llm = thinkingEnabledLlm,
             toolGroups = toolGroups,
             tools = toolConfig.tools,
-            promptContributors = promptContributors + contextualPromptContributors.map {
-                it.toPromptContributor(context)
-            },
+            promptContributors = promptContributors +
+                listOfNotNull(tagHintContributor) +
+                contextualPromptContributors.map { it.toPromptContributor(context) },
             id = interactionId ?: InteractionId("${context.operation.name}-thinking"),
             generateExamples = generateExamples,
             fieldFilter = fieldFilter,

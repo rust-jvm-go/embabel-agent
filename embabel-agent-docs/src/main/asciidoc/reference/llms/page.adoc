@@ -598,6 +598,214 @@ ai.withLlmByRole("best")
 
 NOTE: If no LLM is specified in `@LlmCall` or `withLlm()`, the `default-llm` from configuration is used.
 
+===== Roles across providers
+
+The flat `llms` map above names one model per role, and a model belongs to one provider. That is the
+right shape when a deployment will only ever be keyed for one provider. When it will not - a
+bring-your-own-key application, or one that fails over between providers - give the role a provider
+dimension with `roles`:
+
+[source,yaml]
+----
+embabel:
+  models:
+    default-llm: gpt-4.1-mini
+    roles:
+      cheapest:
+        openai:
+          model: gpt-4.1-nano       # <1>
+        anthropic:
+          model: claude-haiku-4-5
+          temperature: 0.3          # <2>
+      best:
+        openai:
+          model: gpt-4.1
+        anthropic:
+          model: claude-sonnet-4-6
+----
+<1> The model this role means when OpenAI is the active provider
+<2> Tuning configured against the role, applied whenever this role resolves to this provider
+
+Call sites do not change: `ai.withLlmByRole("cheapest")` resolves against whichever provider is
+active for the call. With no user key in play, that is the provider supplying the `default-llm`, so
+a single-provider deployment needs nothing further.
+
+Anything the caller sets explicitly still wins over what the role configures, so
+`ai.withLlmByRole("cheapest").withTemperature(0.9)` keeps `0.9`.
+
+A role that cannot be satisfied - because the active provider has no entry for it, or the model it
+names is not registered - throws `NoSuitableModelException` at the point of use. It does not quietly
+resolve to something else: falling back to the `default-llm` would let a role like `cheapest` become
+the most capable, and most expensive, model in the deployment without anyone noticing.
+
+Startup is a separate question, and the answer depends on whether the deployment holds a key. A
+deployment that has one is expected to name models it has: an unresolvable name there is a typo,
+and letting it boot would move the failure to whichever unrelated call first asks for that role.
+A deployment still waiting for a key has no models registered yet by definition, so the same name
+is expected and only worth reporting.
+
+[cols="2,1,3", options="header", frame="all", grid="all"]
+|===
+|Configuration |At startup |Notes
+
+|Keyed deployment, `embabel.models.llms` names an unregistered model
+|Fails
+|A typo, and fatal. The message names the role and the models that were available.
+
+|Keyed deployment, `embabel.models.roles` names an unregistered model *under the deployment's own provider*
+|Fails
+|Same rule as the flat map. Applying it to only one of the two shapes was the original defect here.
+
+|Keyed deployment, `embabel.models.roles` names a model under *any other* provider
+|Not checked
+|The point of the nested shape. That entry applies when a user brings a key for that provider, so its model is not expected to be registered here - warning about it would train people to ignore the warning.
+
+|Deployment awaiting a key (BYOK, `default-llm` resolving to the placeholder)
+|Warns
+|Nothing is registered yet, so every role is unresolvable and none of it is a typo. Roles resolve to the placeholder, which fails with an actionable "no LLM configured" error until a key arrives. That error names the role and the model it wanted — `cheapest wanted 'gpt-4.1-nanoo'` — because in this mode a misspelled model name and a name merely awaiting a key are indistinguishable at startup, and naming both is what lets you tell them apart.
+
+|A role reached through a user's own credential
+|n/a
+|Resolved per call against that provider's entry only. It never falls back to the flat `embabel.models.llms` map - a user's key must not silently select a model the deployment pays for.
+|===
+
+Whichever way startup goes, asking for a role that cannot be satisfied still throws at the point of
+use, and the message names the role, the active provider, and the models that were available.
+
+===== The deployment default as a role
+
+`default-llm` may name a role rather than a model:
+
+[source,yaml]
+----
+embabel:
+  models:
+    default-llm: cheapest       # <1>
+    roles:
+      cheapest:
+        openai:
+          model: gpt-4.1-nano
+        anthropic:
+          model: claude-haiku-4-5
+----
+<1> A role from `roles` or from the flat `llms` map, not a model name
+
+A model name is resolved once, against the services registered at startup. A role is resolved per
+call, through the same resolver chain as any other role - so the default follows whichever provider
+key is active, and a deployment whose first key arrives after startup gets a working default without
+a restart. That is the case this exists for: under BYOK nothing is registered before the first key,
+so a default fixed at construction can only be the placeholder until the process restarts.
+
+A model name that nothing registers falls back to the role chain as well, so `default-llm` keeps
+working whichever way it was meant. Nothing existing changes: a name that does resolve against a
+registered service is still resolved once and never sent through the resolvers.
+
+A default that nothing can satisfy does not throw the way an unsatisfied role does. It falls back to
+whatever `default-llm` resolved to at startup - the placeholder, in a deployment awaiting a key -
+so the caller sees the same actionable "no LLM configured" error. Startup is stricter: with no
+placeholder to fall back to, a `default-llm` that names nothing this deployment has registered -
+whether a typo or a role whose every model is missing - is still fatal, and the message says which
+of the two it is.
+
+===== Resolving roles in code
+
+To decide what a role means per user rather than per deployment, register a `RoleResolver` bean.
+Resolvers are consulted in `Ordered` order, ahead of the configuration above, and returning `null`
+delegates to the next one.
+
+[source,kotlin]
+----
+@Component
+class ByokRoleResolver(
+    private val userKeyStore: UserKeyStore,
+) : RoleResolver {
+
+    override fun resolve(role: String, context: ModelSelectionContext): RoleResolution? =
+        context.userId
+            ?.let { userKeyStore.activeKeyFor(it) }
+            ?.let { RoleResolution.Credential(ProviderCredential(it.provider, it.apiKey)) }
+}
+----
+
+`RoleResolution.Credential` hands back a key and lets the platform do the rest: it looks up what the
+role means under that provider, builds the service for it, and caches it per (provider, key, model)
+so it is not rebuilt on every call. Return `RoleResolution.Options` to name a model and its tuning
+directly, or `RoleResolution.Service` to supply an `LlmService` you built yourself.
+
+`embabel-agent-starter-byok` already knows where to send a key for every provider BYOK supports —
+Anthropic, OpenAI, DeepSeek, Mistral, Gemini and Atlas Cloud. The resolver above is therefore all
+the code a deployment using any of them needs.
+
+The `ModelSelectionContext` a resolver receives comes from `ModelSelectionContextHolder`, which the
+application sets at its request boundary:
+
+[source,kotlin]
+----
+ModelSelectionContextHolder.with(ModelSelectionContext(userId = currentUserId)) {
+    agentPlatform.runAgent(...)
+}
+----
+
+The platform carries the context across the threads it starts itself — a background agent run,
+parallel actions, `OperationContext.parallelMap` — so setting it once at the request boundary is
+enough. It does not reach threads your own code spawns: capture it there with
+`ModelSelectionContextHolder.get()` and re-establish it inside the new thread.
+
+===== Adding a provider of your own
+
+For a provider the starter does not cover — a gateway, a proxy, a self-hosted endpoint — register a
+`CredentialEndpointResolver`. It says where a key goes and what the service built from it should
+call itself; the platform builds the client:
+
+[source,kotlin]
+----
+@Bean
+fun ourGatewayEndpoint() = CredentialEndpointResolver { credential, _ ->
+    if (!credential.provider.equals("OurGateway", ignoreCase = true)) null
+    else CredentialEndpoint.OpenAiCompatible(provider = "OurGateway", baseUrl = GATEWAY_URL)
+}
+----
+
+The case names the wire protocol, which is what decides the client: `OpenAiCompatible` for the
+OpenAI protocol — OpenAI itself, DeepSeek, Mistral, Gemini, Atlas Cloud and most gateways — or
+`Anthropic` for Anthropic's. Both carry `pricingModel`, which defaults to
+`PricingModel.ALL_YOU_CAN_EAT` because a BYOK call is billed to the user's key rather than to the
+deployment, and `knowledgeCutoffDate`, which is null unless you know it for the model the role named.
+
+Your resolvers are asked first, in `Ordered` order, and the endpoints the starter already knows are
+the fallback — so answering for a provider the framework handles overrides it, which is how you
+route OpenAI through your own proxy. No `@Order` is needed for that; it decides only which of your
+own resolvers is asked first. Return `null` for a provider you do not handle: a resolver that
+answers for everything would point someone else's key at your endpoint. If nothing handles the
+provider, the role fails with `NoSuitableModelException` and a log line naming it.
+
+A resolver returns a value, so it needs no Spring context to test and nothing from
+`com.embabel.agent.spi`, which <<reference.api-evolution,application code should not depend on>>.
+
+For a wire protocol this framework has no client for, register a `CredentialLlmServiceFactory`
+instead and build the service yourself. That one does name `LlmService`, an SPI type, which is why
+it is the second choice rather than the first. The shipped implementations — one per protocol —
+stand aside for a bean of the same name, but replacing one that way also replaces the code that
+builds what your `CredentialEndpointResolver` beans resolve for that protocol.
+
+===== Reading what a role is configured to mean
+
+Resolution answers "what will this call use", which depends on the active key and on any
+`RoleResolver` beans. A settings screen or diagnostic endpoint wants a different question — "what
+does this deployment declare this role to be" — and answering it by reading `embabel.models`
+directly means reimplementing the precedence between the flat and nested shapes, which is how a
+settings screen ends up disagreeing with what actually runs.
+
+`ModelProvider.configuredOptionsForRole` answers that question against the deployment's own
+provider, ignoring user keys and application resolvers:
+
+[source,kotlin]
+----
+val declared: String? = modelProvider.configuredOptionsForRole("cheapest")?.modelName
+----
+
+Use `resolveLlmOptions` instead when you need to know what a specific call will really do.
+
 ===== Using Your Custom Implementation (Alternative)
 
 If you need more control over the LLM operations layer itself, you can extend `ToolLoopLlmOperations`:
@@ -1168,3 +1376,144 @@ val summary = usage.anthropicCacheSummary()
 For complete details on Anthropic's prompt caching, see:
 https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching
 
+
+[[reference.llms.native-structured-output]]
+==== Advanced Feature: Native Structured Output
+
+Native structured output enables the model provider to enforce a JSON Schema directly, rather than relying only on prompt instructions and Embabel's object construction.
+E**mbabel still owns schema generation and object binding**; the native provider path is an optimization and compatibility feature used only when it is explicitly supported and safe for the call.
+
+===== Payload Format
+
+For OpenAI-compatible providers, Spring AI wraps Embabel's schema in a `response_format` JSON schema payload.
+For example, a `MonthItem` object can produce a request fragment like:
+
+[source,json]
+----
+{
+  "response_format": {
+    "type": "json_schema",
+    "json_schema": {
+      "name": "MonthItem",
+      "strict": true,
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "temperature": { "type": "integer" }
+        },
+        "required": [ "name", "temperature" ],
+        "additionalProperties": false
+      }
+    }
+  },
+}
+----
+
+OpenAI validates this schema before generation.
+If the schema is not valid for the provider-native path, the request fails before the model produces output.
+
+===== Participants Roles
+
+- **Embabel** generates the JSON Schema, decides whether the native path is enabled for a call, and parses the final response into the requested object.
+- **Spring AI** wraps Embabel's schema into provider-specific format options, such as OpenAI's `response_format`, and serializes the HTTP request.
+- **The provider** such as OpenAI validates the native structured-output payload and returns output that matches the accepted schema.
+
+===== Configuration and API
+
+Native structured output is advertised in model metadata:
+
+[source,yaml]
+----
+native_support_defaults:
+  structured_output:
+    supported: true
+    strategy: response_format
+    strict: false
+    prompt_instructions: include
+----
+
+For a specific call, enable it through `LlmOptions`:
+
+[tabs]
+====
+Java::
++
+[source,java]
+----
+PromptRunner runner = ai.withLlm(
+        NativeStructuredOutputMode.ENABLED.applyTo(LlmOptions.withDefaultLlm())
+);
+
+MonthItem result = runner.createObject(prompt, MonthItem.class);
+----
+
+Kotlin::
++
+[source,kotlin]
+----
+val runner = ai.withLlm(
+    LlmOptions.fromCriteria(DefaultModelSelectionCriteria)
+        .withNativeStructuredOutput(NativeStructuredOutputMode.ENABLED)
+)
+
+val result = runner.createObject<MonthItem>(prompt)
+----
+====
+
+In Java, call `applyTo` on the desired `NativeStructuredOutputMode`.
+Alternatively, use static imports to keep additional `LlmOptions` configuration in the same chain:
+
+[source,java]
+----
+import static com.embabel.common.ai.model.NativeStructuredOutputMode.ENABLED;
+import static com.embabel.common.ai.model.NativeStructuredOutputModeKt.withNativeStructuredOutput;
+
+LlmOptions options = LlmOptions.withDefaultLlm();
+options = withNativeStructuredOutput(options, ENABLED)
+        .withTemperature(0.8);
+
+PromptRunner runner = ai.withLlm(options);
+----
+
+- `NativeStructuredOutputMode.ENABLED`: Try the native path when model capability and schema compatibility allow it.
+- `NativeStructuredOutputMode.DISABLED`: Force Embabel's normal object construction path.
+- `NativeStructuredOutputMode.DEFAULT`: Let Embabel decide from model capability, API shape, and schema compatibility.
+
+For Java objects, mark required reference fields explicitly:
+
+[source,java]
+----
+static class MonthItem {
+    @JsonProperty(required = true)
+    private String name;
+
+    @JsonProperty(required = true)
+    private Integer temperature;
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public Integer getTemperature() {
+        return temperature;
+    }
+
+    public void setTemperature(Integer temperature) {
+        this.temperature = temperature;
+    }
+}
+----
+
+===== Limitations
+
+- **Required fields**: OpenAI native structured output requires `required` to include every property. Optional Java reference fields are not treated as required unless annotated, for example with `@JsonProperty(required = true)` or `@NotNull`.
+- **Optional values**: Provider-native optionality usually needs nullable required properties, for example `type: ["string", "null"]`, rather than omitting the property from `required`.
+- **Arrays of objects**: Some providers, including OpenAI according to Spring AI documentation, do not support arrays of objects natively. Embabel falls back to normal object construction for unsupported shapes.
+- **Streaming**: Native structured output is not supported for streaming by Spring AI currently
+- **`ifPossible` APIs**: `createObjectIfPossible` and related paths use `MaybeReturn` semantics and stay on Embabel's fallback object construction path.
+- **Provider coverage**: OpenAI-compatible `response_format` is the primary supported path. Anthropic native structured output is currently disabled by default until its semantics are verified.

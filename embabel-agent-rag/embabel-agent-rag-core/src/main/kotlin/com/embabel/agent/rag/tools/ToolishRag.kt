@@ -29,6 +29,7 @@ import com.embabel.agent.rag.service.RegexSearchOperations
 import com.embabel.agent.rag.service.ResultExpander
 import com.embabel.agent.rag.service.RetrievableResultsFormatter
 import com.embabel.agent.rag.service.SearchOperations
+import com.embabel.agent.rag.service.SectionReader
 import com.embabel.agent.rag.service.SimilarityResults
 import com.embabel.agent.rag.service.SimpleRetrievableResultsFormatter
 import com.embabel.agent.rag.service.TextSearch
@@ -86,6 +87,7 @@ fun interface ResultsListener {
  * @param entityFilter optional filter applied to object properties
  * (e.g., [com.embabel.agent.rag.model.NamedEntityData.properties] or typed entity fields).
  * The filter is applied transparently - the LLM does not see or control it.
+ * @param entitiesOnly whether searches should exclude non-entity results such as chunks.
  */
 data class ToolishRag @JvmOverloads constructor(
     override val name: String,
@@ -100,6 +102,7 @@ data class ToolishRag @JvmOverloads constructor(
     val metadataFilter: PropertyFilter? = null,
     val entityFilter: EntityFilter? = null,
     val maxZoomOutChars: Int = ResultExpanderTools.DEFAULT_MAX_ZOOM_OUT_CHARS,
+    val maxReadSectionChars: Int = SectionReadingTools.DEFAULT_MAX_READ_SECTION_CHARS,
     /**
      * Progressively-disclosed guidance appended to the unfold response when
      * the LLM invokes this tool. Right home for search-strategy notes
@@ -109,17 +112,37 @@ data class ToolishRag @JvmOverloads constructor(
      * See [com.embabel.agent.api.tool.progressive.UnfoldingTool.childToolUsageNotes].
      */
     val childToolUsageNotes: String? = null,
+    /**
+     * Similarity floors used when the LLM omits the optional `threshold` parameter
+     * on the vector/text search tools. See [SearchDefaults] for why it is optional.
+     */
+    val searchDefaults: SearchDefaults = SearchDefaults.DEFAULT,
+    val entitiesOnly: Boolean = false,
 ) : LlmReference, DelegatingTool, EagerSearch<ToolishRag> {
 
     private val logger = LoggerFactory.getLogger(javaClass)
 
-    private val validHints = hints.toMutableList()
+    private class ToolishRagInitState(
+        val toolObjects: List<Any>,
+        val validHints: List<PromptContributor>,
+    )
 
-    private val toolObjects: List<Any> = run {
-        buildList {
+    /**
+     * Lazily initialized state grouping [toolObjects] and [validHints].
+     *
+     * [ToolishRag] is a data class — every [copy] call (e.g. [withHint], [withEagerSearchAbout])
+     * creates a new instance and would re-run any eager initializer, needlessly rebuilding
+     * [VectorSearchTools], [TextSearchTools] etc. even when only [hints] changed.
+     *
+     * Lazy deferral means initialization runs exactly once per instance, on first access to
+     * [tools] or [notes], not on construction or copy.
+     */
+    private val initState: ToolishRagInitState by lazy {
+        val mutableHints = hints.toMutableList()
+        val tools = buildList {
             // If the search operations already implement SearchTools, use them directly
             if (searchOperations is SearchTools) {
-                logger.info("Adding existing SearchTools to ToolishRag '{}'", name)
+                logger.debug("Adding existing SearchTools to ToolishRag '{}'", name)
                 add(searchOperations)
             }
             // This can confuse guide. Let's skip it for now.
@@ -133,30 +156,68 @@ data class ToolishRag @JvmOverloads constructor(
             }
             if (searchOperations is VectorSearch) {
                 logger.debug("Adding VectorSearchTools to ToolishRag '{}'", name)
-                add(VectorSearchTools(searchOperations, vectorSearchFor, metadataFilter, entityFilter, listener))
+                add(vectorSearchTools(searchOperations))
             } else {
                 if (hints.any { it is TryHyDE }) {
                     logger.warn(
                         "HyDE hint provided but no VectorSearch available in ToolishRag: Removing this hint {}",
                         name
                     )
-                    validHints.removeIf { it is TryHyDE }
+                    mutableHints.removeIf { it is TryHyDE }
                 }
             }
             if (searchOperations is TextSearch) {
                 logger.debug("Adding TextSearchTools to ToolishRag '{}'", name)
-                add(TextSearchTools(searchOperations, textSearchFor, metadataFilter, entityFilter, listener))
+                add(
+                    TextSearchTools(
+                        textSearch = searchOperations,
+                        searchFor = textSearchFor,
+                        metadataFilter = metadataFilter,
+                        entityFilter = entityFilter,
+                        resultsListener = listener,
+                        searchDefaults = searchDefaults,
+                        resultExpander = searchOperations as? ResultExpander,
+                        entitiesOnly = entitiesOnly,
+                    )
+                )
             }
             if (searchOperations is ResultExpander) {
                 logger.debug("Adding ResultExpanderTools to ToolishRag '{}'", name)
-                add(ResultExpanderTools(searchOperations, maxZoomOutChars))
+                add(ResultExpanderTools(searchOperations, maxZoomOutChars, listener))
+            }
+            if (searchOperations is SectionReader) {
+                logger.debug("Adding SectionReadingTools to ToolishRag '{}'", name)
+                add(SectionReadingTools(searchOperations, listener, maxReadSectionChars))
             }
             if (searchOperations is RegexSearchOperations) {
                 logger.debug("Adding RegexSearchTools to ToolishRag '{}'", name)
-                add(RegexSearchTools(searchOperations, metadataFilter, entityFilter, listener))
+                add(
+                    RegexSearchTools(
+                        regexSearch = searchOperations,
+                        metadataFilter = metadataFilter,
+                        entityFilter = entityFilter,
+                        resultsListener = listener,
+                        entitiesOnly = entitiesOnly,
+                    )
+                )
             }
         }
+        ToolishRagInitState(tools, mutableHints.toList())
     }
+
+    private val toolObjects: List<Any> get() = initState.toolObjects
+    private val validHints: List<PromptContributor> get() = initState.validHints
+
+    private fun vectorSearchTools(vectorSearch: VectorSearch) = VectorSearchTools(
+        vectorSearch,
+        vectorSearchFor,
+        metadataFilter,
+        entityFilter,
+        listener,
+        searchDefaults,
+        searchOperations as? ResultExpander,
+        entitiesOnly,
+    )
 
     /**
      * Set the types to search for with vector and text search
@@ -211,34 +272,63 @@ data class ToolishRag @JvmOverloads constructor(
         copy(entityFilter = filter)
 
     /**
+     * Limit search results to named entities.
+     */
+    fun withEntitiesOnly(entitiesOnly: Boolean = true): ToolishRag =
+        copy(entitiesOnly = entitiesOnly)
+
+    /**
      * Set the maximum number of characters for zoomOut results before truncation.
      * Larger values suit LLMs with bigger context windows.
      */
     fun withMaxZoomOutChars(maxChars: Int): ToolishRag =
         copy(maxZoomOutChars = maxChars)
 
+    /**
+     * Set the maximum number of characters a single readSection result may return
+     * before it is truncated at a chunk boundary.
+     */
+    fun withMaxReadSectionChars(maxChars: Int): ToolishRag =
+        copy(maxReadSectionChars = maxChars)
+
+    /**
+     * Set the similarity floors applied when the LLM omits the optional `threshold`
+     * search parameter. Deployments that have calibrated a cutoff against their own
+     * eval set should set it here rather than expecting the model to pass one.
+     */
+    fun withSearchDefaults(searchDefaults: SearchDefaults): ToolishRag =
+        copy(searchDefaults = searchDefaults)
+
     override fun withEagerSearchAbout(request: TextSimilaritySearchRequest): ToolishRag {
         val vs = searchOperations as? VectorSearch
             ?: throw UnsupportedOperationException(
                 "Eager search requires VectorSearch but searchOperations is ${searchOperations::class.simpleName}"
             )
-        val results = vectorSearchFor.flatMap { clazz ->
-            vs.vectorSearch(request, clazz)
-        }
-        val deduplicated = deduplicateByIdKeepingHighestScore(results)
-        val formatted = formatter.formatResults(SimilarityResults.fromList(deduplicated))
+        val results = vectorSearchTools(vs).search(request)
+        val formatted = formatter.formatResults(SimilarityResults.fromList(results))
         return copy(
             hints = hints + PromptContributor.fixed("Preloaded search results for '${request.query}':\n$formatted"),
         )
     }
 
-    // LlmReference: returns flat list of inner tools with naming strategy applied
+    // LlmReference: returns flat list of inner tools with naming strategy applied.
+    //
+    // Items in [toolObjects] may already BE [Tool] instances (e.g. [TextSearchTools],
+    // which is a Tool with a description composed dynamically from the store's
+    // [TextSearch.luceneSyntaxNotes]) or they may be classes carrying `@LlmTool`-annotated
+    // methods (most other SearchTools). Handle both — `Tool.fromInstance` would throw
+    // "no @LlmTool methods" on the Tool branch.
     override fun tools(): List<Tool> = toolObjects
-        .flatMap { Tool.fromInstance(it) }
+        .flatMap { instance ->
+            when (instance) {
+                is Tool -> listOf(instance)
+                else -> Tool.fromInstance(instance)
+            }
+        }
         .map { tool -> tool.withName(namingStrategy.transform(tool.definition.name)) }
 
     // Tool interface implementation via lazy UnfoldingTool
-    // When used directly as a Tool, wraps all inner tools in a MatryoshkaTool
+    // When used directly as a Tool, wraps all inner tools in a UnfoldingTool
     // Implements DelegatingTool so MatryoshkaToolInjectionStrategy can unwrap it
     override val delegate: Tool by lazy {
         UnfoldingTool.of(
@@ -255,12 +345,12 @@ data class ToolishRag @JvmOverloads constructor(
     override fun call(input: String): Tool.Result =
         delegate.call(input)
 
+    // The text-search syntax notes USED to be emitted here, but they're now
+    // composed into the `textSearch` tool's own description in
+    // [TextSearchTools] — single source of truth, fixes the contradiction
+    // surfaced by embabel/embabel-agent#1298. Don't add the syntax line
+    // back here unless the tool description is also updated.
     override fun notes() = """
-        ${
-        (searchOperations as? TextSearch)?.let {
-            "Lucene search syntax support: ${searchOperations.luceneSyntaxNotes}\n"
-        }
-    }
         Hints: ${validHints.joinToString("\n") { it.contribution() }}
         Search acceptance criteria:
         $goal

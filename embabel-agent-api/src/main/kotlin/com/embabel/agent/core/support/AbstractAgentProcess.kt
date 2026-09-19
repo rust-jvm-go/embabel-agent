@@ -13,10 +13,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.core.support
 
 import com.embabel.agent.api.common.TerminationScope
 import com.embabel.agent.api.common.TerminationSignal
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.api.termination.TerminationSignalPolicy
 import com.embabel.agent.api.tool.TerminateActionException
 import com.embabel.agent.api.tool.TerminateAgentException
@@ -24,6 +27,8 @@ import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.common.StuckHandlingResultCode
 import com.embabel.agent.api.common.ToolsStats
 import com.embabel.agent.api.event.*
+import com.embabel.agent.api.event.observation.ActionObservationContext
+import com.embabel.agent.api.event.observation.AgentObservationContext
 import com.embabel.agent.core.*
 import com.embabel.agent.core.AgentProcess.Companion.withCurrent
 import com.embabel.agent.spi.DelayedActionExecutionSchedule
@@ -243,6 +248,16 @@ abstract class AbstractAgentProcess(
     override val history: List<ActionInvocation>
         get() = _history.toList()
 
+    @InternalAgentStateApi
+    internal fun replaceRuntimeState(
+        status: AgentProcessStatusCode,
+        history: List<ActionInvocation>,
+    ) {
+        _status.set(status)
+        _history.clear()
+        _history.addAll(history)
+    }
+
     override val toolsStats: ToolsStats
         get() = agenticEventListenerToolsStats
 
@@ -325,9 +340,18 @@ abstract class AbstractAgentProcess(
         if (!makeRunning()) {
             return this
         }
+        return platformServices.instrumentation.observe(
+            { AgentObservationContext(this) },
+        ) { executeTurn() }
+    }
 
+    /**
+     * Execute one turn: plan and tick until the status leaves RUNNING, then emit the terminal
+     * lifecycle event. Wrapped in the `embabel.agent` span by [run] when observability is configured.
+     */
+    private fun executeTurn(): AgentProcess {
         if (agent.goals.isEmpty() && processOptions.plannerType.needsGoals) {
-            logger.info("🛑 Process {} has no goals: {}", this.id, agent.goals)
+            logger.error("🛑 Process {} has no goals", this.id)
             error("Agent ${agent.name} has no goals: ${agent.infoString(verbose = true)}")
         }
 
@@ -393,9 +417,9 @@ abstract class AbstractAgentProcess(
                 this.id,
                 signalTermination.reason,
             )
-            platformServices.eventListener.onProcessEvent(signalTermination)
             _failureInfo = signalTermination
             setStatus(AgentProcessStatusCode.TERMINATED)
+            platformServices.eventListener.onProcessEvent(signalTermination)
             return signalTermination
         }
 
@@ -417,9 +441,9 @@ abstract class AbstractAgentProcess(
                 earlyTermination.policy,
                 earlyTermination.reason,
             )
-            platformServices.eventListener.onProcessEvent(earlyTermination)
             _failureInfo = earlyTermination
             setStatus(AgentProcessStatusCode.TERMINATED)
+            platformServices.eventListener.onProcessEvent(earlyTermination)
             return earlyTermination
         }
         return null
@@ -501,9 +525,25 @@ abstract class AbstractAgentProcess(
     ): AgentProcess
 
     /**
-     * Execute an action
+     * Execute the given action, wrapping it in a Micrometer observation for tracing.
+     * The status code is recorded on the [ActionObservationContext]; the observation
+     * is skipped when no registry is active (see [Observations.observeOrSkip]).
+     *
+     * @param action the action to execute
+     * @return the [ActionStatus] describing the outcome
      */
     protected fun executeAction(action: Action): ActionStatus {
+        val observationContext = ActionObservationContext(this, action)
+        return platformServices.instrumentation.observe(
+            { observationContext },
+        ) {
+            val actionStatus = doExecuteAction(action)
+            observationContext.statusCode = actionStatus.status
+            actionStatus
+        }
+    }
+
+    private fun doExecuteAction(action: Action): ActionStatus {
         val outputTypes: Map<String, DomainType> =
             action.outputs.associateBy({ it.name }, { agent.resolveType(it.type) })
         logger.debug(

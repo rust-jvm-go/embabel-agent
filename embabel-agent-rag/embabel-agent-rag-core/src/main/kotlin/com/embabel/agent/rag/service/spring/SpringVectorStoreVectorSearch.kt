@@ -18,7 +18,6 @@ package com.embabel.agent.rag.service.spring
 import com.embabel.agent.filter.ObjectFilter
 import com.embabel.agent.filter.PropertyFilter
 import com.embabel.agent.rag.filter.EntityFilter
-import com.embabel.agent.rag.filter.InMemoryPropertyFilter
 import com.embabel.agent.rag.model.Chunk
 import com.embabel.agent.rag.model.Retrievable
 import com.embabel.agent.rag.service.FilteringVectorSearch
@@ -52,16 +51,7 @@ class SpringVectorStoreVectorSearch(
         clazz: Class<T>,
         metadataFilter: PropertyFilter?,
         entityFilter: EntityFilter?,
-    ): List<SimilarityResult<T>> {
-        // Apply metadata filter natively via Spring AI
-        val results = executeSearch<T>(request, metadataFilter?.toSpringAiExpression())
-        // Apply property filter in-memory if specified
-        return if (entityFilter != null) {
-            InMemoryPropertyFilter.filterByProperties(results, entityFilter)
-        } else {
-            results
-        }
-    }
+    ): List<SimilarityResult<T>> = executeSearch(request, metadataFilter?.toSpringAiExpression())
 
     @Suppress("UNCHECKED_CAST")
     private fun <T : Retrievable> executeSearch(
@@ -142,6 +132,11 @@ fun PropertyFilter.toSpringAiExpression(): Filter.Expression = when (this) {
         Filter.ExpressionType.EQ,  // Spring AI doesn't have CONTAINS, fallback to EQ
         Filter.Key(key),
         Filter.Value(value)
+    )
+
+    is PropertyFilter.HasElement -> throw UnsupportedOperationException(
+        "HasElement filter (membership in a list-valued property) cannot be translated to a " +
+                "Spring AI filter expression. Use in-memory filtering instead."
     )
 
     // String filters not natively supported by Spring AI - require in-memory filtering

@@ -42,7 +42,7 @@ import com.embabel.agent.core.last
 import com.embabel.agent.domain.io.UserInput
 import com.embabel.agent.support.Dog
 import com.embabel.common.ai.model.LlmOptions
-import com.fasterxml.jackson.databind.annotation.JsonDeserialize
+import tools.jackson.databind.annotation.JsonDeserialize
 
 data class PersonWithReverseTool(val name: String) {
 
@@ -602,7 +602,7 @@ class FromPersonUsesObjectToolsViaAi {
         ai: Ai,
     ): UserInput {
         return ai.withDefaultLlm()
-            .withToolObjectInstances(ToolObject(FunnyTool()))
+            .withToolObjects(ToolObject(FunnyTool()))
             .createObject("Create a UserInput")
     }
 }
@@ -822,6 +822,19 @@ class AgentWithNonReadOnlyAction {
     }
 }
 
+@Agent(description = "agent with multiple AchievesGoal actions")
+class AgentWithMultipleAchievesGoalActions {
+
+    @AchievesGoal(description = "First result")
+    @Action
+    fun firstAction(userInput: UserInput): PersonWithReverseTool = PersonWithReverseTool(userInput.content)
+
+    @AchievesGoal(description = "Second result")
+    @Action
+    fun secondAction(person: PersonWithReverseTool): Frog = Frog(person.name)
+
+}
+
 @Agent(description = "agent with duplicate action names via overloaded methods")
 class AgentWithDuplicateActionNames {
 
@@ -855,4 +868,34 @@ class AgentWithOperationContextConstructorInjection(
     @AchievesGoal(description = "goal")
     @Action
     fun act(input: UserInput): PersonWithReverseTool = PersonWithReverseTool(input.content)
+}
+
+@Agent(description = "goal method is not annotated with Action on agent")
+class AgentWithAchievesGoalNoActionAnnotation {
+    @Action
+    fun makeFrogFromPerson(userInput: UserInput): Frog {
+        return Frog(userInput.content)
+    }
+
+    @AchievesGoal(description = "goal")
+    fun goal(frog: Frog): PersonWithReverseTool = PersonWithReverseTool(frog.name)
+}
+
+@EmbabelComponent()
+class AgenticComponentWithNoActionNoConditionNoGoalAnnotation {
+    fun makeFrogFromPerson(userInput: UserInput): Frog {
+        return Frog(userInput.content)
+    }
+
+    @AchievesGoal(description = "goal")
+    fun goal(frog: Frog): PersonWithReverseTool = PersonWithReverseTool(frog.name)
+}
+
+@Agent(description = "valid goal method")
+class AgentWithValidAchievesGoalMethod {
+    @Action
+    @AchievesGoal(description = "goal")
+    fun goal(input: UserInput): String {
+        return "dummy"
+    }
 }

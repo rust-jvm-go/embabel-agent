@@ -16,10 +16,12 @@
 package com.embabel.agent.rag.service.support
 
 import com.embabel.agent.rag.model.Chunk
+import com.embabel.agent.rag.model.ChunkStructure
 import com.embabel.agent.rag.model.Retrievable
 import com.embabel.agent.rag.service.RegexSearchOperations
 import com.embabel.agent.rag.service.TextSearch
 import com.embabel.agent.tools.file.FileTools
+import com.embabel.agent.tools.file.globMatcher
 import com.embabel.common.core.types.SimilarityResult
 import com.embabel.common.core.types.SimpleSimilaritySearchResult
 import com.embabel.common.core.types.TextSimilaritySearchRequest
@@ -98,9 +100,8 @@ class DirectoryTextSearch @JvmOverloads constructor(
     private val logger = LoggerFactory.getLogger(DirectoryTextSearch::class.java)
     private val fileReadTools = FileTools.readOnly(directory)
     private val rootPath = Path.of(directory).toAbsolutePath().normalize()
-    private val globMatcher = config.fileGlob?.let {
-        java.nio.file.FileSystems.getDefault().getPathMatcher("glob:$it")
-    }
+    // Same '**' rules as ripgrep and .gitignore: '**/' matches zero or more folders. See globMatcher.
+    private val globMatch: ((Path) -> Boolean)? = config.fileGlob?.let { globMatcher(it) }
 
     override val luceneSyntaxNotes: String = "Not supported"
 
@@ -228,12 +229,7 @@ class DirectoryTextSearch @JvmOverloads constructor(
             }
             .filter { path ->
                 // Apply glob filter if specified
-                if (globMatcher != null) {
-                    val relativePath = rootPath.relativize(path)
-                    globMatcher.matches(relativePath)
-                } else {
-                    true
-                }
+                globMatch == null || globMatch(rootPath.relativize(path))
             }
             .iterator()
             .asSequence()
@@ -253,14 +249,15 @@ class DirectoryTextSearch @JvmOverloads constructor(
         queryTerms: List<String>,
         score: Double,
     ): List<Chunk> {
-        // Find all match positions (case-insensitive)
-        val contentLower = content.lowercase()
+        // Find all match positions in the original content (case-insensitive). We must
+        // index into `content` directly rather than a lowercased copy: lowercasing can
+        // change string length for some characters (e.g. 'İ' -> "i̇"), which would shift
+        // offsets and slice chunks that no longer contain the match.
         val matchPositions = queryTerms.flatMap { term ->
-            val termLower = term.lowercase()
             var index = 0
             val positions = mutableListOf<Int>()
             while (true) {
-                val pos = contentLower.indexOf(termLower, index)
+                val pos = content.indexOf(term, index, ignoreCase = true)
                 if (pos < 0) break
                 positions.add(pos)
                 index = pos + 1
@@ -290,11 +287,12 @@ class DirectoryTextSearch @JvmOverloads constructor(
         // Return whole file if chunking disabled or file is small
         if (config.chunkSize <= 0 || content.length <= config.chunkSize) {
             return listOf(
-                Chunk(
+                Chunk.create(
                     id = relativePath,
                     text = content,
                     parentId = directory,
-                    metadata = baseMetadata + ("chunk_index" to 0) + ("total_chunks" to 1),
+                    metadata = baseMetadata,
+                    structure = ChunkStructure(chunkIndex = 0, totalChunks = 1),
                 )
             )
         }
@@ -312,16 +310,15 @@ class DirectoryTextSearch @JvmOverloads constructor(
 
         // Create chunks from merged ranges
         return mergedRanges.mapIndexed { index, (start, end) ->
-            Chunk(
+            Chunk.create(
                 id = if (mergedRanges.size == 1) relativePath else "$relativePath#$index",
                 text = content.substring(start, end),
                 parentId = if (mergedRanges.size == 1) directory else relativePath,
                 metadata = baseMetadata + mapOf(
-                    "chunk_index" to index,
                     "chunk_start" to start,
                     "chunk_end" to end,
-                    "total_chunks" to mergedRanges.size,
                 ),
+                structure = ChunkStructure(chunkIndex = index, totalChunks = mergedRanges.size),
             )
         }
     }

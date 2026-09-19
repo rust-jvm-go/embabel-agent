@@ -16,12 +16,17 @@
 package com.embabel.agent.config.models.openai
 
 import com.embabel.agent.api.models.OpenAiModels
+import com.embabel.agent.config.models.openai.OpenAiProperties.Companion.PREFIX
+import com.embabel.agent.openai.CapabilityAwareOpenAiOptionsConverter
 import com.embabel.agent.openai.Gpt5ChatOptionsConverter
+import com.embabel.agent.openai.ModelCapabilities
 import com.embabel.agent.openai.OpenAiCompatibleModelFactory
 import com.embabel.agent.openai.StandardOpenAiOptionsConverter
 import com.embabel.agent.spi.LlmService
+import com.embabel.common.ai.model.OptionsConverter
 import com.embabel.agent.spi.common.RetryProperties
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
+import com.embabel.agent.spi.support.springai.SpringAiNativeStructuredOutputConfigurer
 import com.embabel.common.ai.autoconfig.LlmAutoConfigMetadataLoader
 import com.embabel.common.ai.autoconfig.ProviderInitialization
 import com.embabel.common.ai.autoconfig.RegisteredModel
@@ -31,6 +36,7 @@ import com.embabel.common.ai.model.PerTokenPricingModel
 import com.embabel.common.ai.model.PricingModel
 import com.embabel.common.util.ExcludeFromJacocoGeneratedReport
 import io.micrometer.observation.ObservationRegistry
+import org.springframework.ai.openai.OpenAiChatOptions
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
@@ -47,7 +53,7 @@ import org.springframework.web.reactive.function.client.WebClient
  * These properties can be set in application.properties/yaml using the
  * prefix embabel.agent.platform.models.openai.
  */
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.openai")
+@ConfigurationProperties(prefix = PREFIX)
 class OpenAiProperties : RetryProperties {
     /**
      * Base URL for OpenAI API requests.
@@ -88,6 +94,11 @@ class OpenAiProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 180000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX  = "embabel.agent.platform.models.openai"
+    }
 }
 
 /**
@@ -116,6 +127,8 @@ class OpenAiModelsConfig(
     private val modelLoader: LlmAutoConfigMetadataLoader<OpenAiModelDefinitions> = OpenAiModelLoader(),
     @Qualifier("aiModelWebClientBuilder")
     webClientBuilder: ObjectProvider<WebClient.Builder>,
+    private val nativeStructuredOutputConfigurer: SpringAiNativeStructuredOutputConfigurer =
+        OpenAiNativeStructuredOutputConfigurer,
 ) : OpenAiCompatibleModelFactory(
     baseUrl = envBaseUrl ?: properties.baseUrl,
     apiKey = envApiKey ?: properties.apiKey
@@ -128,6 +141,13 @@ class OpenAiModelsConfig(
     webClientBuilder = webClientBuilder,
 ) {
 
+    /**
+     * Resolved the same way as the one handed to the superclass, which keeps it private. Only the
+     * Responses adapter needs it here — Spring AI's own chat model is given it by the factory.
+     */
+    private val resolvedObservationRegistry: ObservationRegistry =
+        observationRegistry.getIfUnique { ObservationRegistry.NOOP }
+
     init {
         logger.info("OpenAI models are available: {}", properties)
     }
@@ -135,10 +155,11 @@ class OpenAiModelsConfig(
     @Bean
     fun openAiModelsInitializer(): ProviderInitialization {
         val definitions = modelLoader.loadAutoConfigMetadata()
+        val effectiveModels = definitions.effectiveModels()
 
         val registeredLlms = buildList {
             // Register LLM models
-            definitions.models.forEach { modelDef ->
+            effectiveModels.forEach { modelDef ->
                 try {
                     val llm = createOpenAiLlm(modelDef)
                     configurableBeanFactory.registerSingleton(modelDef.name, llm)
@@ -186,16 +207,24 @@ class OpenAiModelsConfig(
      * Uses custom SpringAiLlm constructor when pricing model is not available.
      */
     private fun createOpenAiLlm(modelDef: OpenAiModelDefinition): LlmService<*> {
-        // Determine the appropriate options converter based on model configuration
-        val optionsConverter = if (modelDef.specialHandling?.supportsTemperature == false) {
-            Gpt5ChatOptionsConverter
-        } else {
-            StandardOpenAiOptionsConverter
-        }
+        // Capability-aware converter from YAML special_handling (warn-and-drop, never throw).
+        // Canonical DEFAULT / GPT5_FAMILY map back to the shared object aliases so identity
+        // checks in tests and equals-based wiring stay stable.
+        val optionsConverter = optionsConverterFor(modelDef.specialHandling.toModelCapabilities())
 
-        val chatModel = chatModelOf(
-            model = modelDef.modelId, retryTemplate = properties.retryTemplate(modelDef.modelId)
-        )
+        // Transport is declared per model, like the converter above: most models speak Chat
+        // Completions, the *-pro family is served only over the Responses API.
+        val chatModel = when (modelDef.apiFormat) {
+            OpenAiApiFormat.CHAT_COMPLETIONS -> chatModelOf(
+                model = modelDef.modelId, retryTemplate = properties.retryTemplate(modelDef.modelId)
+            )
+
+            OpenAiApiFormat.RESPONSES -> OpenAiResponsesChatModel(
+                client = openAiClient,
+                defaultOptions = OpenAiChatOptions.builder().model(modelDef.modelId).build(),
+                observationRegistry = resolvedObservationRegistry,
+            )
+        }
 
         // Create pricing model if present
         val pricingModel = modelDef.pricingModel?.let {
@@ -213,6 +242,9 @@ class OpenAiModelsConfig(
             optionsConverter = optionsConverter,
             knowledgeCutoffDate = modelDef.knowledgeCutoffDate,
             pricingModel = pricingModel,
+            thinkingSupported = true,
+            nativeStructuredOutputConfigurer = nativeStructuredOutputConfigurer,
+            nativeSupport = modelDef.nativeSupport,
         )
     }
 
@@ -229,5 +261,24 @@ class OpenAiModelsConfig(
             configuredDimensions = embeddingDef.dimensions,
             pricingModel = pricing,
         )
+    }
+
+    private fun SupportFeaturesConfiguration?.toModelCapabilities(): ModelCapabilities {
+        if (this == null) {
+            return ModelCapabilities.DEFAULT
+        }
+        return ModelCapabilities(
+            supportsTemperature = supportsTemperature,
+            supportsTopP = supportsTopP,
+            supportsFrequencyPenalty = supportsFrequencyPenalty,
+            supportsPresencePenalty = supportsPresencePenalty,
+            usesMaxCompletionTokens = usesMaxCompletionTokens,
+        )
+    }
+
+    private fun optionsConverterFor(capabilities: ModelCapabilities): OptionsConverter = when (capabilities) {
+        ModelCapabilities.DEFAULT -> StandardOpenAiOptionsConverter
+        ModelCapabilities.GPT5_FAMILY -> Gpt5ChatOptionsConverter
+        else -> CapabilityAwareOpenAiOptionsConverter(capabilities)
     }
 }

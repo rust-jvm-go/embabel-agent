@@ -15,10 +15,9 @@
  */
 package com.embabel.common.ai.autoconfig
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.PropertyNamingStrategies
-import com.fasterxml.jackson.dataformat.yaml.YAMLFactory
-import com.fasterxml.jackson.module.kotlin.registerKotlinModule
+import tools.jackson.databind.PropertyNamingStrategies
+import tools.jackson.dataformat.yaml.YAMLMapper
+import tools.jackson.module.kotlin.kotlinModule
 import org.slf4j.LoggerFactory
 import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.core.io.ResourceLoader
@@ -40,10 +39,11 @@ abstract class AbstractYamlModelLoader<T : LlmAutoConfigProvider<*>>(
 
     protected val logger = LoggerFactory.getLogger(this::class.java)
 
-    protected val yamlMapper = ObjectMapper(YAMLFactory())
-        .registerKotlinModule()
-        .findAndRegisterModules()
-        .setPropertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+    protected val yamlMapper = YAMLMapper.builder()
+        .addModule(kotlinModule())
+        .findAndAddModules()
+        .propertyNamingStrategy(PropertyNamingStrategies.SNAKE_CASE)
+        .build()
 
     /**
      * Loads model definitions from YAML configuration.
@@ -70,7 +70,7 @@ abstract class AbstractYamlModelLoader<T : LlmAutoConfigProvider<*>>(
                 logger.info("Loaded {} {} model definitions", it.models.size, getProviderName())
             }
         } catch (e: Exception) {
-            logger.error("Failed to load {} models from {}", getProviderName(), configPath, e)
+            logger.warn("Failed to load {} models from {}: {}", getProviderName(), configPath, e.message)
             createEmptyProvider()
         }
     }

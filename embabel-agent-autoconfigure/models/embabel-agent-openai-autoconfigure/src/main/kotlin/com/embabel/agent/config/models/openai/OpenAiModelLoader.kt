@@ -15,10 +15,13 @@
  */
 package com.embabel.agent.config.models.openai
 
+import com.embabel.agent.api.models.OpenAiModels
 import com.embabel.common.ai.autoconfig.AbstractYamlModelLoader
 import com.embabel.common.ai.autoconfig.LlmAutoConfigMetadata
 import com.embabel.common.ai.autoconfig.LlmAutoConfigProvider
+import com.embabel.common.ai.autoconfig.NativeSupport
 import com.embabel.common.ai.model.PerTokenPricingModel
+import com.fasterxml.jackson.annotation.JsonAlias
 import org.springframework.core.io.DefaultResourceLoader
 import org.springframework.core.io.ResourceLoader
 import java.time.LocalDate
@@ -34,8 +37,17 @@ import java.time.LocalDate
  */
 data class OpenAiModelDefinitions(
     override val models: List<OpenAiModelDefinition> = emptyList(),
-    val embeddingModels: List<OpenAiEmbeddingModelDefinition> = emptyList()
-) : LlmAutoConfigProvider<OpenAiModelDefinition>
+    val embeddingModels: List<OpenAiEmbeddingModelDefinition> = emptyList(),
+    val nativeSupportDefaults: NativeSupport? = null,
+) : LlmAutoConfigProvider<OpenAiModelDefinition> {
+    fun effectiveModels(): List<OpenAiModelDefinition> {
+        return models.map { model ->
+            model.copy(
+                nativeSupport = model.nativeSupport?.merge(nativeSupportDefaults) ?: nativeSupportDefaults,
+            )
+        }
+    }
+}
 
 /**
  * OpenAI-specific LLM model definition.
@@ -51,7 +63,9 @@ data class OpenAiModelDefinitions(
  * @property maxTokens maximum tokens for completion (default 16384)
  * @property temperature sampling temperature (default 1.0)
  * @property topP nucleus sampling parameter
- * @property specialHandling optional special handling configuration (e.g., GPT-5 temperature)
+ * @property specialHandling optional sampling-parameter support flags (YAML `special_handling`)
+ * @property apiFormat wire format this model is served over (Chat Completions vs Responses)
+ * @property nativeSupport optional provider-native support metadata
  */
 data class OpenAiModelDefinition(
     override val name: String,
@@ -62,16 +76,55 @@ data class OpenAiModelDefinition(
     val maxTokens: Int = 16384,
     val temperature: Double = 1.0,
     val topP: Double? = null,
-    val specialHandling: SpecialHandlingConfiguration? = null,
+    /**
+     * YAML key remains `special_handling` (Jackson property name). Type is
+     * [SupportFeaturesConfiguration] — which sampling parameters this model accepts.
+     */
+    val specialHandling: SupportFeaturesConfiguration? = null,
+    val apiFormat: OpenAiApiFormat = OpenAiApiFormat.CHAT_COMPLETIONS,
+    @param:JsonAlias("native-support")
+    override val nativeSupport: NativeSupport? = null,
 ) : LlmAutoConfigMetadata
 
 /**
- * Special handling configuration for models with unique requirements.
+ * Wire format an OpenAI model is served over.
  *
- * @property supportsTemperature whether the model supports temperature adjustment
+ * OpenAI exposes text models over two mutually incompatible APIs. Almost all are served over
+ * `/v1/chat/completions`, but the `*-pro` models are served *only* over `/v1/responses` and
+ * reject Chat Completions requests outright.
+ *
+ * Declared per model rather than inferred from the model id: OpenAI decides which models are
+ * Responses-only, and a naming convention is not a contract.
+ *
+ * @see <a href="https://github.com/embabel/embabel-agent/issues/1758">Issue 1758</a>
  */
-data class SpecialHandlingConfiguration(
-    val supportsTemperature: Boolean = true
+enum class OpenAiApiFormat {
+    CHAT_COMPLETIONS,
+    RESPONSES,
+}
+
+/**
+ * Which sampling / request parameters a model supports.
+ *
+ * Sourced from `special_handling` in model YAML (property [OpenAiModelDefinition.specialHandling]).
+ * Defaults preserve historical "all parameters supported" behavior when a flag is omitted.
+ * Mapped at registration time to [com.embabel.agent.openai.ModelCapabilities].
+ *
+ * Formerly named `SpecialHandlingConfiguration`; renamed for clarity (YAML key unchanged).
+ *
+ * @property supportsTemperature whether the model supports non-default temperature
+ * @property supportsTopP whether the model supports top_p
+ * @property supportsFrequencyPenalty whether the model supports frequency_penalty
+ * @property supportsPresencePenalty whether the model supports presence_penalty
+ * @property usesMaxCompletionTokens when true, map the token limit to `max_completion_tokens`
+ *   (GPT-5 family rejects `max_tokens` for presence alone)
+ */
+data class SupportFeaturesConfiguration(
+    val supportsTemperature: Boolean = true,
+    val supportsTopP: Boolean = true,
+    val supportsFrequencyPenalty: Boolean = true,
+    val supportsPresencePenalty: Boolean = true,
+    val usesMaxCompletionTokens: Boolean = false,
 )
 
 /**
@@ -118,7 +171,7 @@ class OpenAiModelLoader(
 
     override fun createEmptyProvider() = OpenAiModelDefinitions()
 
-    override fun getProviderName() = "OpenAI"
+    override fun getProviderName() = OpenAiModels.PROVIDER
 
     override fun validateModels(provider: OpenAiModelDefinitions) {
         // Validate LLM models
@@ -130,6 +183,11 @@ class OpenAiModelLoader(
             }
             model.topP?.let {
                 require(it in 0.0..1.0) { "Top P must be between 0 and 1 for model ${model.name}" }
+            }
+            model.pricingModel?.let {
+                require(it.usdPer1mInputTokens >= 0 && it.usdPer1mOutputTokens >= 0) {
+                    "Pricing must be non-negative for model ${model.name}"
+                }
             }
         }
 

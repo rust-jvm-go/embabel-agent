@@ -58,7 +58,7 @@ interface LlmReference : NamedAndDescribed, PromptContributor {
         level = DeprecationLevel.WARNING,
     )
     fun toolObject(): ToolObject = ToolObject(
-        objects = toolInstances(),
+        objects = tools(),
         namingStrategy = namingStrategy,
     )
 
@@ -111,24 +111,6 @@ interface LlmReference : NamedAndDescribed, PromptContributor {
                 else -> Tool.fromInstance(instance)
             }
         }
-    }
-
-    /**
-     * Convert this reference to a MatryoshkaReference,
-     * exposing a single tool object that supports nesting.
-     * Do not rewrap a MatryoshkaReference. Thus
-     * repeated calls to this method are safe.
-     */
-    @Deprecated(
-        replaceWith = ReplaceWith(
-            expression = "withUnfoldingTool()",
-        ),
-        message = "Use withUnfoldingTool()",
-        level = DeprecationLevel.WARNING,
-    )
-    fun asMatryoshka(): LlmReference = when (this) {
-        is UnfoldingReference -> this
-        else -> UnfoldingReference(this)
     }
 
     /**

@@ -24,6 +24,7 @@ import com.embabel.agent.domain.io.UserInput
 import com.embabel.agent.shell.config.ShellProperties
 import com.embabel.agent.spi.logging.ColorPalette
 import com.embabel.agent.spi.logging.LoggingPersonality
+import com.embabel.common.util.EmbabelObjectMapperHolder
 import com.embabel.chat.Chatbot
 import com.embabel.chat.agent.AgentProcessChatbot
 import com.embabel.chat.agent.DefaultChatAgentBuilder
@@ -32,7 +33,6 @@ import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.util.bold
 import com.embabel.common.util.color
-import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.Logger
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.SpringApplication
@@ -54,7 +54,7 @@ class ShellCommands(
     private val modelProvider: ModelProvider,
     private val terminalServices: TerminalServices,
     private val environment: ConfigurableEnvironment,
-    private val objectMapper: ObjectMapper,
+    private val embabelObjectMapperHolder: EmbabelObjectMapperHolder,
     private val colorPalette: ColorPalette,
     loggingPersonality: LoggingPersonality,
     private val toolsStats: ToolsStats,
@@ -189,13 +189,17 @@ class ShellCommands(
 
     @ShellMethod("List agents")
     fun agents(): String {
+        val agents = agentPlatform.agents()
+        if (agents.isEmpty()) {
+            return "No agents registered"
+        }
         val detail = "${"Agents:".bold()}\n${
-            agentPlatform.agents()
+            agents
                 .joinToString(separator = "\n${"-".repeat(shellProperties.lineLength)}\n") {
                     it.infoString(verbose = true, indent = 1)
                 }
         }"
-        return detail + "\n\nTL;DR\n${agentPlatform.agents().joinToString("\n") { "${it.name}: ${it.description}" }}"
+        return detail + "\n\nSummary\n${agents.joinToString("\n") { "${it.name}: ${it.description}" }}"
     }
 
     @ShellMethod("List actions")
@@ -204,7 +208,7 @@ class ShellCommands(
             agentPlatform.actions
                 .joinToString(separator = "\n") { it.infoString(verbose = true, indent = 1) }
         }"
-        return detail + "\n\nTL;DR\n${agentPlatform.actions.joinToString("\n") { "${it.name}: ${it.description}" }}"
+        return detail + "\n\nSummary\n${agentPlatform.actions.joinToString("\n") { "${it.name}: ${it.description}" }}"
     }
 
     @ShellMethod("List conditions")
@@ -287,7 +291,7 @@ class ShellCommands(
     @ShellMethod("Show options")
     fun showOptions(): String {
         // Don't show the blackboard as it's long
-        return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(
+        return embabelObjectMapperHolder.get().writerWithDefaultPrettyPrinter().writeValueAsString(
             defaultProcessOptions.copy(blackboard = null)
         ).replace(
             """
@@ -424,9 +428,9 @@ class ShellCommands(
         intent: String,
     ): String {
         val opt = if (processOptions.verbosity.debug) {
-            objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(processOptions)
+            embabelObjectMapperHolder.get().writerWithDefaultPrettyPrinter().writeValueAsString(processOptions)
         } else {
-            objectMapper.writeValueAsString(processOptions)
+            embabelObjectMapperHolder.get().writeValueAsString(processOptions)
         }
         logger.info(
             "Created process options: $opt".color(colorPalette.highlight)
@@ -484,7 +488,7 @@ class ShellCommands(
             val result = run()
             logger.debug("Result: {}\n", result)
             recordAgentProcess(result.agentProcess)
-            return formatProcessOutput(result, colorPalette, objectMapper, shellProperties.lineLength)
+            return formatProcessOutput(result, colorPalette, embabelObjectMapperHolder.get(), shellProperties.lineLength)
         } catch (ngf: NoGoalFound) {
             if (verbosity.debug) {
                 logger.info(

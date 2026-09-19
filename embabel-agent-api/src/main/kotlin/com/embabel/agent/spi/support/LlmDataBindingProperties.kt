@@ -18,13 +18,17 @@ package com.embabel.agent.spi.support
 import com.embabel.agent.api.tool.ToolControlFlowSignal
 import com.embabel.agent.api.validation.guardrails.GuardRailViolationException
 import com.embabel.agent.core.ReplanRequestedException
+import com.embabel.agent.spi.common.LlmRetryDecision
 import com.embabel.agent.spi.common.RetryTemplateProvider
+import com.embabel.agent.spi.support.LlmDataBindingProperties.Companion.PREFIX
 import org.slf4j.LoggerFactory
 import org.springframework.boot.context.properties.ConfigurationProperties
 import org.springframework.retry.RetryCallback
 import org.springframework.retry.RetryContext
 import org.springframework.retry.RetryListener
 import org.springframework.retry.support.RetryTemplate
+import tools.jackson.databind.DatabindException
+import tools.jackson.databind.exc.MismatchedInputException
 import java.time.Duration
 
 /**
@@ -35,11 +39,12 @@ import java.time.Duration
  * @param sendValidationInfo Should we send validation info to the LLM in every request,
  * even before a validation error occurs?
  */
-@ConfigurationProperties(prefix = "embabel.agent.platform.llm-operations.data-binding")
+@ConfigurationProperties(prefix = PREFIX)
 class LlmDataBindingProperties(
     override val maxAttempts: Int = 10,
     val fixedBackoffMillis: Long = 30L,
     val sendValidationInfo: Boolean = true,
+    override val propertyPrefix: String = PREFIX,
 ) : RetryTemplateProvider {
 
     private val logger = LoggerFactory.getLogger(LlmDataBindingProperties::class.java)
@@ -63,6 +68,7 @@ class LlmDataBindingProperties(
                     if (throwable is ToolControlFlowSignal) {
                         throw throwable
                     }
+                    if (hasNonRetryableDatabindException(throwable)) throw throwable
                     if (isRateLimitError(throwable)) {
                         logger.info(
                             "LLM invocation {} RATE LIMITED: Retry attempt {} of {}",
@@ -76,8 +82,24 @@ class LlmDataBindingProperties(
                             name,
                             context.retryCount,
                             maxAttempts,
-                            throwable.message ?: "Unknown error"
+                            throwable.message ?: "Unknown error",
                         )
+                    }
+                }
+                override fun <T: Any, E : Throwable> close(
+                    context: RetryContext,
+                    callback: RetryCallback<T, E>,
+                    throwable: Throwable?,
+                ) {
+                    throwable?.let {
+                        if (context.retryCount >= maxAttempts) {
+                            logger.warn(
+                                "LLM invocation {}: Maximum attempts of {} have been reached. The maximum attempt can be configured using property {}.max-attempts",
+                                name,
+                                maxAttempts,
+                                propertyPrefix
+                            )
+                        }
                     }
                 }
             })
@@ -85,19 +107,28 @@ class LlmDataBindingProperties(
     }
 
     companion object {
-        private val RATE_LIMIT_PATTERNS = listOf(
-            "rate limit",
-            "too many requests",
-            "quota exceeded",
-            "rate-limited",
-            "429",
-        )
+        const val PREFIX  = "embabel.agent.platform.llm-operations.data-binding"
 
-        fun isRateLimitError(t: Throwable): Boolean {
-            val message = t.message?.lowercase() ?: return false
-            return RATE_LIMIT_PATTERNS.any { pattern ->
-                message.contains(pattern)
+        fun isRateLimitError(t: Throwable): Boolean = LlmRetryDecision.isRateLimit(t)
+
+        /**
+         * Walks the full exception cause chain looking for a DatabindException that is NOT
+         * a MismatchedInputException. Such exceptions indicate Jackson config/annotation errors
+         * (e.g. wrong @JsonDeserialize target) — infrastructure bugs, not transient LLM output
+         * quality issues. MismatchedInputException (LLM omitted a required field) IS retryable
+         * and must be excluded.
+         *
+         * Note: DatabindException may be wrapped inside RuntimeException by JacksonOutputConverter
+         * before reaching the retry layer, so a full cause-chain walk is required rather than a
+         * simple instanceof check.
+         */
+        internal fun hasNonRetryableDatabindException(throwable: Throwable): Boolean {
+            var cause: Throwable? = throwable
+            while (cause != null) {
+                if (cause is DatabindException && cause !is MismatchedInputException) return true
+                cause = cause.cause
             }
+            return false
         }
     }
 }

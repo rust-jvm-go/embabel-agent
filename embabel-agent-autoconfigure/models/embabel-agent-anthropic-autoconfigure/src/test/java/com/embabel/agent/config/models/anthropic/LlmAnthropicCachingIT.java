@@ -29,6 +29,7 @@ import com.embabel.chat.UserMessage;
 import com.embabel.chat.support.InMemoryConversation;
 import com.embabel.common.ai.model.LlmOptions;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -38,10 +39,12 @@ import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.ActiveProfiles;
 
+import com.embabel.agent.anthropic.AnthropicCachingConfig;
+
 import java.util.ArrayList;
 import java.util.List;
 
-import static com.embabel.agent.config.models.anthropic.AnthropicCachingConfigKt.withAnthropicCaching;
+import static com.embabel.agent.anthropic.AnthropicCachingConfigKt.withAnthropicCaching;
 import static com.embabel.agent.config.models.anthropic.AnthropicUsage.*;
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -74,7 +77,7 @@ import static org.junit.jupiter.api.Assertions.*;
                 "spring.main.allow-bean-definition-overriding=true",
 
                 // Debug logging for caching
-                "logging.level.com.embabel.agent.config.models.anthropic.AnthropicOptionsConverter=DEBUG",
+                "logging.level.com.embabel.agent.anthropic.AnthropicOptionsConverter=DEBUG",
                 "logging.level.org.springframework.ai.anthropic=DEBUG",
                 "logging.level.org.springframework.ai.anthropic.api=DEBUG",
                 "logging.level.com.embabel.agent.spi.support.springai.ChatClientLlmOperations=TRACE"
@@ -100,6 +103,8 @@ import static org.junit.jupiter.api.Assertions.*;
         }
 )
 @Import({AgentAnthropicAutoConfiguration.class})
+@EnabledIfEnvironmentVariable(named = "ANTHROPIC_API_KEY", matches = ".+",
+        disabledReason = "Integration test requires ANTHROPIC_API_KEY")
 class LlmAnthropicCachingIT {
 
     private static final Logger logger = LoggerFactory.getLogger(LlmAnthropicCachingIT.class);
@@ -306,7 +311,7 @@ class LlmAnthropicCachingIT {
 
     @Test
     void testSystemPromptCaching() {
-        logger.info("Testing system prompt caching");
+        logger.info("Testing system prompt caching with thinking enabled");
 
         AnthropicCachingConfig cachingConfig = new AnthropicCachingConfig();
         cachingConfig.setSystemPrompt(true);

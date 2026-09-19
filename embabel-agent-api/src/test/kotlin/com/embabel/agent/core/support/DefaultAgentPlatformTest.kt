@@ -16,6 +16,8 @@
 package com.embabel.agent.core.support
 
 import com.embabel.agent.api.channel.DevNullOutputChannel
+import com.embabel.common.util.EmbabelObjectMapperHolder
+import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.dsl.evenMoreEvilWizard
 import com.embabel.agent.api.event.AgenticEventListener
 import com.embabel.agent.core.AgentPlatform
@@ -30,6 +32,8 @@ import com.embabel.agent.support.Dog
 import com.embabel.agent.test.common.EventSavingAgenticEventListener
 import io.mockk.mockk
 import org.junit.jupiter.api.Assertions.assertEquals
+import org.junit.jupiter.api.Assertions.assertInstanceOf
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Nested
 import org.junit.jupiter.api.Test
 
@@ -48,7 +52,7 @@ class DefaultAgentPlatformTest {
             l,
             contextRepository = contextRepository,
             asyncer = mockk(),
-            objectMapper = mockk(),
+            embabelObjectMapperHolder = EmbabelObjectMapperHolder(mockk()),
             outputChannel = DevNullOutputChannel,
             templateRenderer = mockk(),
         )
@@ -97,4 +101,37 @@ class DefaultAgentPlatformTest {
 
     }
 
+    @Nested
+    inner class PlatformServicesOverride {
+
+        @Test
+        fun `subclass can override platformServices with a different implementation`() {
+            val base = raw()
+            val custom = CustomPlatformServices(base.platformServices)
+            val subclassed: AgentPlatform = SubclassedAgentPlatform(custom)
+
+            assertNotNull(subclassed.platformServices)
+            assertInstanceOf(CustomPlatformServices::class.java, subclassed.platformServices)
+        }
+    }
+
+}
+
+private class CustomPlatformServices(delegate: PlatformServices) : PlatformServices by delegate
+
+private class SubclassedAgentPlatform(
+    customServices: PlatformServices,
+) : DefaultAgentPlatform(
+    name = "subclassed",
+    description = "subclassed platform",
+    processType = ProcessType.SIMPLE,
+    llmOperations = mockk(),
+    toolGroupResolver = mockk(relaxed = true),
+    eventListener = EventSavingAgenticEventListener(),
+    asyncer = mockk(),
+    embabelObjectMapperHolder = EmbabelObjectMapperHolder(mockk()),
+    outputChannel = DevNullOutputChannel,
+    templateRenderer = mockk(),
+) {
+    override val platformServices: PlatformServices = customServices
 }

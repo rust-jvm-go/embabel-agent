@@ -18,7 +18,7 @@ package com.embabel.agent.api.tool
 import com.embabel.agent.api.tool.Tool.Definition
 import com.embabel.agent.api.tool.progressive.UnfoldingTool
 import com.embabel.agent.core.DomainType
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 
 /**
  * Tool information including definition and metadata,
@@ -498,7 +498,7 @@ interface Tool : ToolInfo {
 
         @JvmStatic
         fun fromInstance(instance: Any): List<Tool> =
-            super.fromInstance(instance, com.fasterxml.jackson.module.kotlin.jacksonObjectMapper())
+            super.fromInstance(instance, tools.jackson.module.kotlin.jacksonObjectMapper())
 
         @JvmStatic
         override fun fromInstance(
@@ -508,7 +508,7 @@ interface Tool : ToolInfo {
 
         @JvmStatic
         fun safelyFromInstance(instance: Any): List<Tool> =
-            super.safelyFromInstance(instance, com.fasterxml.jackson.module.kotlin.jacksonObjectMapper())
+            super.safelyFromInstance(instance, tools.jackson.module.kotlin.jacksonObjectMapper())
 
         @JvmStatic
         override fun safelyFromInstance(
@@ -737,6 +737,16 @@ private data class SimpleInputSchema(
         val schema = mutableMapOf<String, Any>(
             "type" to "object",
             "properties" to properties,
+            // State that this is the WHOLE argument list, not a prefix of it. Without it, JSON
+            // Schema permits unknown properties, so a caller that gets a parameter NAME wrong is
+            // told only what is missing and never what is wrong: passing `query` for a required
+            // `cypher` reports "required property 'cypher' not found" and says nothing about
+            // `query` — the one token the caller could act on. That matters most for LLM callers,
+            // which cannot see their own mistake in that message and retry the same shape.
+            // Mirrored in VictoolsSchemaGenerator.generateToolInputSchema, which builds the same
+            // envelope; keep the two in step. Per-PARAMETER schemas are left open, because they
+            // describe values rather than the argument list.
+            "additionalProperties" to false,
         )
         if (required.isNotEmpty()) {
             schema["required"] = required

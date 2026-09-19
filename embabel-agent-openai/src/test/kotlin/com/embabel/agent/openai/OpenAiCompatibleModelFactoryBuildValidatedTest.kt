@@ -16,6 +16,7 @@
 package com.embabel.agent.openai
 
 import com.embabel.agent.api.models.OpenAiModels
+import com.embabel.common.byok.BLANK_API_KEY_MESSAGE
 import com.embabel.common.byok.InvalidApiKeyException
 import com.embabel.common.ai.model.PricingModel
 import com.sun.net.httpserver.HttpServer
@@ -25,6 +26,7 @@ import io.mockk.every
 import io.mockk.just
 import io.mockk.mockk
 import org.junit.jupiter.api.AfterEach
+import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -66,7 +68,10 @@ class OpenAiCompatibleModelFactoryBuildValidatedTest {
 
     @Test
     fun `buildValidated throws InvalidApiKeyException on 401`() {
-        server.createContext("/v1/chat/completions") { exchange ->
+        // Wildcard root handler — Spring AI 2.0 + openai-java 4.x may hit any of
+        // /v1/chat/completions, /v1/responses, or /chat/completions depending on
+        // the SDK's endpoint routing; we don't care which path is used for this probe.
+        server.createContext("/") { exchange ->
             exchange.requestBody.use { it.readBytes() }
             val body = """{"error":{"message":"Invalid API key","type":"invalid_request_error"}}""".toByteArray()
             exchange.sendResponseHeaders(401, body.size.toLong())
@@ -86,7 +91,8 @@ class OpenAiCompatibleModelFactoryBuildValidatedTest {
 
     @Test
     fun `buildValidated returns LlmService on 200`() {
-        server.createContext("/v1/chat/completions") { exchange ->
+        // Wildcard root handler — same reasoning as the 401 test above.
+        server.createContext("/") { exchange ->
             exchange.requestBody.use { it.readBytes() }
             val body = """
                 {
@@ -111,5 +117,50 @@ class OpenAiCompatibleModelFactoryBuildValidatedTest {
             knowledgeCutoffDate = null,
         )
         assertNotNull(service)
+    }
+
+    @Test
+    fun `buildValidated rejects a blank key without calling the provider`() {
+        var requests = 0
+        server.createContext("/") { exchange ->
+            requests++
+            exchange.sendResponseHeaders(500, -1)
+            exchange.close()
+        }
+        server.start()
+
+        val blankKeyFactory = OpenAiCompatibleModelFactory(
+            baseUrl = "http://localhost:$port",
+            apiKey = "   ",
+            completionsPath = null,
+            embeddingsPath = null,
+            observationRegistry = ObservationRegistry.NOOP,
+            restClientBuilder = restClientBuilder,
+        )
+
+        val e = assertThrows<InvalidApiKeyException> {
+            blankKeyFactory.buildValidated(
+                model = OpenAiModels.GPT_41_MINI,
+                pricingModel = PricingModel.ALL_YOU_CAN_EAT,
+                provider = OpenAiModels.PROVIDER,
+                knowledgeCutoffDate = null,
+            )
+        }
+        assertEquals(BLANK_API_KEY_MESSAGE, e.message)
+        assertEquals(0, requests, "a blank key must not reach the provider")
+    }
+
+    @Test
+    fun `the ByokSpec entry points reject a blank key too`() {
+        listOf(
+            OpenAiCompatibleModelFactory.openAi("   "),
+            OpenAiCompatibleModelFactory.deepSeek(""),
+            OpenAiCompatibleModelFactory.mistral("\t"),
+            OpenAiCompatibleModelFactory.gemini(" "),
+            OpenAiCompatibleModelFactory.atlasCloud("\n"),
+        ).forEach { spec ->
+            val e = assertThrows<InvalidApiKeyException> { spec.buildValidated() }
+            assertEquals(BLANK_API_KEY_MESSAGE, e.message)
+        }
     }
 }

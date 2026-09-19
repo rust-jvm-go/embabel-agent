@@ -16,6 +16,7 @@
 package com.embabel.agent.config.models.lmstudio
 
 import com.embabel.agent.api.models.LmStudioModels
+import com.embabel.agent.config.models.lmstudio.LmStudioProperties.Companion.PREFIX
 import com.embabel.agent.openai.OpenAiCompatibleModelFactory
 import com.embabel.agent.spi.common.RetryProperties
 import com.embabel.common.ai.autoconfig.ProviderInitialization
@@ -23,7 +24,7 @@ import com.embabel.common.ai.autoconfig.RegisteredModel
 import com.embabel.common.ai.model.PricingModel
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties
 import com.fasterxml.jackson.annotation.JsonProperty
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import io.micrometer.observation.ObservationRegistry
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.ObjectProvider
@@ -38,13 +39,13 @@ import org.springframework.http.client.SimpleClientHttpRequestFactory
 import org.springframework.web.client.RestClient
 import org.springframework.web.reactive.function.client.WebClient
 
-@ConfigurationProperties(prefix = "embabel.agent.platform.models.lmstudio")
+@ConfigurationProperties(prefix = PREFIX)
 class LmStudioProperties : RetryProperties {
 
     /**
      * Base URL for LM Studio endpoint
      */
-    var baseUrl: String = "http://127.0.0.1:1234"
+    var baseUrl: String = DEFAULT_BASE_URL
 
     /**
      * API key for LM Studio. Defaults to null as apiKey isn't supported yet.
@@ -70,6 +71,14 @@ class LmStudioProperties : RetryProperties {
      * Maximum backoff interval (in milliseconds).
      */
     override var backoffMaxInterval: Long = 180000L
+
+    override val propertyPrefix: String = PREFIX
+    companion object {
+        const val PREFIX = "embabel.agent.platform.models.lmstudio"
+        const val DEFAULT_HOST = "localhost"
+        const val DEFAULT_PORT = 1234
+        const val DEFAULT_BASE_URL = "http://$DEFAULT_HOST:$DEFAULT_PORT"
+    }
 }
 
 /**
@@ -88,7 +97,15 @@ class LmStudioModelsConfig(
     @Qualifier("aiModelWebClientBuilder")
     webClientBuilder: ObjectProvider<WebClient.Builder>,
 ) : OpenAiCompatibleModelFactory(
-    baseUrl = lmStudioProperties.baseUrl,
+    // The SDK appends `/chat/completions` to whatever it is given — the factory's
+    // own docs say to bake the full path into the base URL — while discovery
+    // below appends `/v1/models` to the SAME property. Both cannot be satisfied
+    // by one configured value, and the mismatch is silent: models are listed
+    // (discovery is right) and then every completion 404s with LM Studio's
+    // "Unexpected endpoint or method", which surfaces to the caller as the
+    // baffling "`choices` is not set". Normalise here so the configured value
+    // stays the plain server address a user would write.
+    baseUrl = chatBaseUrl(lmStudioProperties.baseUrl),
     apiKey = lmStudioProperties.apiKey,
     completionsPath = null,
     embeddingsPath = null,
@@ -98,6 +115,18 @@ class LmStudioModelsConfig(
 ) {
 
     private val log = LoggerFactory.getLogger(LmStudioModelsConfig::class.java)
+
+    companion object {
+        /**
+         * The URL the OpenAI SDK should treat as its API root: LM Studio serves
+         * the OpenAI surface under `/v1`, so append it unless the operator has
+         * already done so.
+         */
+        internal fun chatBaseUrl(baseUrl: String): String {
+            val clean = baseUrl.trimEnd('/')
+            return if (clean.endsWith("/v1")) clean else "$clean/v1"
+        }
+    }
 
     // OpenAI-compatible models response
     @JsonIgnoreProperties(ignoreUnknown = true)
@@ -191,7 +220,11 @@ class LmStudioModelsConfig(
                 .requestFactory(requestFactory)
                 .build()
 
-            val cleanBaseUrl = baseUrl?.trimEnd('/') ?: "http://127.0.0.1:1234"
+            // The RAW configured address, deliberately — NOT the inherited `baseUrl`,
+            // which is normalised to end in /v1 for the SDK. Reading that here
+            // built `…/v1/api/v1/models`, discovered nothing, and left the
+            // appliance unable to start with a local default model.
+            val cleanBaseUrl = lmStudioProperties.baseUrl.trimEnd('/')
             val apiUrl = if (cleanBaseUrl.contains("/api")) {
                 cleanBaseUrl
             } else {
@@ -224,7 +257,7 @@ class LmStudioModelsConfig(
 
             response.models?: emptyList()
         } catch (e: Exception) {
-            log.warn("Failed to load models from {}: {}", baseUrl, e.message)
+            log.warn("Failed to load models from {}: {}", lmStudioProperties.baseUrl, e.message)
             emptyList()
         }
     }

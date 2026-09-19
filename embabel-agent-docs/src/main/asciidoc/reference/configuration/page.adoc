@@ -55,8 +55,8 @@ From `ConfigurableModelProviderProperties` - configuration for default LLMs and 
 
 |`embabel.models.default-llm`
 |String
-|`gpt-4.1-mini`
-|Default LLM name. It's good practice to override this in configuration.
+|`gpt-5.6-luna`
+|The deployment default: either an LLM name, or a role from `embabel.models.llms` or `embabel.models.roles`. A role is resolved per call, so a deployment whose key arrives at runtime has a working default without a restart. It's good practice to override this in configuration.
 
 |`embabel.models.default-embedding-model`
 |String
@@ -180,6 +180,36 @@ From `AgentPlatformProperties.ScanningConfig` - configures scanning of the class
 |Whether to auto register as agents Spring beans of type `Agent`
 
 |===
+
+===== Planner Configuration
+
+Controls how the GOAP planner processes annotated agents during startup.
+
+[cols="3,2,1,4",options="header"]
+|===
+|Property |Type |Default |Description
+
+|`embabel.agent.platform.planner.restricted-goals`
+|Boolean
+|`false`
+|When `false` (default), allows `@Agent` to declare multiple `@AchievesGoal` actions with different distinct return types, enabling the planner to gate actions by mutually exclusive `@Condition` annotations. When `true`, restricts to a single unique return type across all `@AchievesGoal` actions; any `@Agent` violating this is rejected at startup.
+
+|`embabel.agent.api.validation.manager.skip-agent-deployment-on-error`
+|Boolean
+|`false`
+|When `false` (default), validation manager only logs structural errors of `@Agent`s. When `true`, any invalid `@Agent` reported by validation manager is rejected at startup.
+
+|===
+
+.Example - opt-in restriction for strict single-goal enforcement
+[source,yaml]
+----
+embabel:
+  agent:
+    platform:
+      planner:
+        restricted-goals: true
+----
 
 ===== Ranking Configuration
 
@@ -500,6 +530,144 @@ embedding_models:
       usd_per1m_tokens: 0.15
 ----
 
+====== OCI Generative AI
+
+OCI Generative AI models are configured through the `embabel-agent-starter-oci-genai` starter dependency.
+The starter registers OCI chat and embedding models from bundled metadata and uses the OCI Java SDK authentication providers.
+
+When the standard OpenAI provider is not on the classpath, the OCI starter supplies OCI defaults for Embabel's default
+LLM and embedding model:
+
+[source,properties]
+----
+embabel.models.default-llm=cohere.command-a-03-2025
+embabel.models.default-embedding-model=cohere.embed-v4.0
+----
+
+Override those values in application configuration if you want another OCI model.
+Use OCI model ids for Embabel model selection.
+The starter's Spring bean names are Java-friendly aliases, for example `cohere_command_a` for `cohere.command-a-03-2025`
+and `llama_33_70b` for `meta.llama-3.3-70b-instruct`.
+
+[cols="3,2,1,4",options="header"]
+|===
+|Property |Type |Default |Description
+
+|`embabel.agent.platform.models.ocigenai.authentication-type`
+|Enum
+|`FILE`
+|Authentication provider to use. Supported values are `FILE`, `INSTANCE_PRINCIPAL`, `RESOURCE_PRINCIPAL`, `WORKLOAD_IDENTITY`, `SESSION_TOKEN` and `SIMPLE`.
+
+|`embabel.agent.platform.models.ocigenai.config-file`
+|String
+|`~/.oci/config`
+|OCI config file path for `FILE` authentication, or optional config file path for `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.profile`
+|String
+|`DEFAULT`
+|OCI config profile name.
+
+|`embabel.agent.platform.models.ocigenai.region`
+|String
+|_(none)_
+|OCI region id, such as `us-chicago-1`. Used when an explicit endpoint is not set.
+
+|`embabel.agent.platform.models.ocigenai.endpoint`
+|String
+|_(none)_
+|Explicit OCI Generative AI inference endpoint URL. Overrides region-based endpoint selection.
+
+|`embabel.agent.platform.models.ocigenai.compartment-id`
+|String
+|_(none)_
+|OCI compartment OCID used for chat and embedding requests. Required.
+
+|`embabel.agent.platform.models.ocigenai.serving-mode`
+|Enum
+|`ON_DEMAND`
+|OCI serving mode. Supported values are `ON_DEMAND` and `DEDICATED`.
+
+|`embabel.agent.platform.models.ocigenai.endpoint-id`
+|String
+|_(none)_
+|Dedicated serving endpoint OCID. Required when `serving-mode` is `DEDICATED`.
+
+|`embabel.agent.platform.models.ocigenai.tenant-id`
+|String
+|_(none)_
+|Tenancy OCID for `SIMPLE`, `SESSION_TOKEN`, or workload identity configuration as required by the selected OCI authentication provider.
+
+|`embabel.agent.platform.models.ocigenai.user-id`
+|String
+|_(none)_
+|User OCID for `SIMPLE` or builder-based `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.fingerprint`
+|String
+|_(none)_
+|API key fingerprint for `SIMPLE` or builder-based `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.private-key`
+|String
+|_(none)_
+|PEM private key content for `SIMPLE` authentication. Prefer `private-key-file` where possible.
+
+|`embabel.agent.platform.models.ocigenai.private-key-file`
+|String
+|_(none)_
+|Path to a PEM private key file for `SIMPLE` or builder-based `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.pass-phrase`
+|String
+|_(none)_
+|Private key pass phrase, if the configured private key is encrypted.
+
+|`embabel.agent.platform.models.ocigenai.session-token`
+|String
+|_(none)_
+|Session token value for builder-based `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.session-token-file`
+|String
+|_(none)_
+|Path to a session token file for builder-based `SESSION_TOKEN` authentication.
+
+|`embabel.agent.platform.models.ocigenai.workload-identity-token-path`
+|String
+|_(none)_
+|Workload identity token path for `WORKLOAD_IDENTITY` authentication.
+
+|`embabel.agent.platform.models.ocigenai.federation-endpoint`
+|String
+|_(none)_
+|Optional federation endpoint for principal-based authentication.
+
+|`embabel.agent.platform.models.ocigenai.max-attempts`
+|Int
+|`10`
+|Maximum retry attempts for OCI GenAI requests.
+
+|`embabel.agent.platform.models.ocigenai.backoff-millis`
+|Long
+|`5000`
+|Initial retry backoff in milliseconds.
+
+|`embabel.agent.platform.models.ocigenai.backoff-multiplier`
+|Double
+|`5.0`
+|Retry backoff multiplier.
+
+|`embabel.agent.platform.models.ocigenai.backoff-max-interval`
+|Long
+|`180000`
+|Maximum retry backoff interval in milliseconds.
+
+|===
+
+If your application exposes Spring Boot Actuator `env` or `configprops` values, secure those endpoints and sanitize OCI
+credential property names such as `pass-phrase`, `session-token` and `private-key`.
+
 ===== HTTP Client Configuration
 
 From `NettyClientFactoryProperties` - configuration for the HTTP client used by model providers (OpenAI, Anthropic, etc.) when making API calls.
@@ -562,6 +730,36 @@ TIP: For models with extended thinking enabled (like Claude with thinking mode),
 * *Streaming responses*: The `read-timeout` applies to the initial response; streaming content has its own handling
 
 NOTE: The HTTP client configuration applies to all model providers that use Spring's `RestClient` and `WebClient`, including OpenAI, Anthropic, and OpenAI-compatible endpoints.
+
+===== Template Renderer
+
+From the `JinjaProperties` nested in `AgentPlatformProperties` - Jinja template renderer configuration.
+
+[cols="3,2,1,4",options="header"]
+|===
+|Property |Type |Default |Description
+
+|`embabel.agent.platform.template.prefix`
+|String
+|`classpath:/prompts/`
+|Spring resource prefix used to load templates
+
+|`embabel.agent.platform.template.suffix`
+|String
+|`.jinja`
+|Suffix added to template names that do not already include it
+
+|`embabel.agent.platform.template.fail-on-unknown-tokens`
+|Boolean
+|`false`
+|Whether rendering fails when a template contains unknown tokens
+
+|`embabel.agent.platform.template.nested-interpretation-enabled`
+|Boolean
+|`false`
+|Whether template syntax inside substituted values is evaluated recursively. Do not enable this for untrusted or user-provided values.
+
+|===
 
 ===== Server-Sent Events
 
@@ -652,17 +850,17 @@ From `LlmOperationsPromptsProperties` - properties for ChatClientLlmOperations o
 |===
 |Property |Type |Default |Description
 
-|`embabel.llm-operations.prompts.maybe-prompt-template`
+|`embabel.agent.platform.llm-operations.prompts.maybe-prompt-template`
 |String
 |`maybe_prompt_contribution`
 |Template to use for the "maybe" prompt, which can enable a failure result if the LLM does not have enough information to create the desired output structure
 
-|`embabel.llm-operations.prompts.generate-examples-by-default`
+|`embabel.agent.platform.llm-operations.prompts.generate-examples-by-default`
 |Boolean
 |`true`
 |Whether to generate examples by default
 
-|`embabel.llm-operations.prompts.default-timeout`
+|`embabel.agent.platform.llm-operations.prompts.default-timeout`
 |Duration
 |`60s`
 |Default timeout for operations
@@ -800,4 +998,3 @@ From `DockerProperties` - configuration for Docker local models (OpenAI-compatib
 |Maximum backoff interval in milliseconds
 
 |===
-

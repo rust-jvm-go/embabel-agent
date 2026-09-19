@@ -13,13 +13,19 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.support
 
 import com.embabel.agent.api.channel.OutputChannel
 import com.embabel.agent.api.common.Asyncer
 import com.embabel.agent.api.common.PlatformServices
 import com.embabel.agent.api.common.autonomy.Autonomy
+import com.embabel.common.util.EmbabelObjectMapperHolder
 import com.embabel.agent.api.event.AgenticEventListener
+import com.embabel.agent.api.event.observation.AgentInstrumentation
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
+import com.embabel.agent.api.event.observation.NoOpAgentInstrumentation
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcessRepository
 import com.embabel.agent.core.expression.LogicalExpressionParser
@@ -30,8 +36,9 @@ import com.embabel.agent.spi.expression.spel.SpelLogicalExpressionParser
 import com.embabel.chat.ConversationFactoryProvider
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import org.springframework.beans.factory.getBean
+import org.springframework.beans.factory.getBeanProvider
 import org.springframework.beans.factory.getBeansOfType
 import org.springframework.context.ApplicationContext
 
@@ -48,12 +55,14 @@ data class SpringContextPlatformServices(
     override val operationScheduler: OperationScheduler,
     override val agentProcessRepository: AgentProcessRepository,
     override val asyncer: Asyncer,
-    override val objectMapper: ObjectMapper,
+    private val embabelObjectMapperHolder: EmbabelObjectMapperHolder,
     override val outputChannel: OutputChannel,
     override val templateRenderer: TemplateRenderer,
     val customLogicalExpressionParser: LogicalExpressionParser? = null,
     private val applicationContext: ApplicationContext?,
 ) : PlatformServices {
+
+    override val objectMapper: ObjectMapper = embabelObjectMapperHolder.get()
 
     override val logicalExpressionParser = customLogicalExpressionParser ?: run {
         val parsers = buildList {
@@ -64,6 +73,19 @@ data class SpringContextPlatformServices(
             }
         }
         LogicalExpressionParser.of(*parsers.toTypedArray())
+    }
+
+    /**
+     * Resolves the [AgentInstrumentation] bean, else [NoOpAgentInstrumentation]. Only the
+     * observability module contributes a real adapter, so when that module is absent (or disabled)
+     * the core creates no span — without ever reading an ambient `ObservationRegistry`. Resolved
+     * lazily, like [observationRegistry], to avoid touching the context at construction time.
+     */
+    override val instrumentation: AgentInstrumentation by lazy {
+        applicationContext
+            ?.getBeanProvider<AgentInstrumentation>()
+            ?.getIfUnique { NoOpAgentInstrumentation }
+            ?: NoOpAgentInstrumentation
     }
 
     override fun withEventListener(agenticEventListener: AgenticEventListener): PlatformServices {

@@ -13,6 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class, InternalStreamingApi::class)
+
 package com.embabel.agent.e2e
 
 import com.embabel.agent.AgentApiTestApplication
@@ -21,6 +23,7 @@ import com.embabel.agent.api.common.Ai
 import com.embabel.agent.api.common.autonomy.Autonomy
 import com.embabel.agent.api.common.streaming.StreamingPromptRunner
 import com.embabel.agent.api.common.streaming.asStreaming
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
 import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.internal.LlmOperations
 import com.embabel.agent.spi.LlmService
@@ -28,12 +31,15 @@ import com.embabel.agent.spi.ToolDecorator
 import com.embabel.agent.spi.support.FakeChatModel
 import com.embabel.agent.spi.support.springai.ChatClientLlmOperations
 import com.embabel.agent.spi.support.springai.SpringAiLlmService
+import com.embabel.agent.spi.support.streaming.InternalStreamingApi
+import com.embabel.agent.spi.support.streaming.StreamingCapabilityDetector
 import com.embabel.common.ai.model.DefaultOptionsConverter
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.ai.model.PricingModel
 import com.embabel.common.textio.template.TemplateRenderer
-import com.fasterxml.jackson.databind.ObjectMapper
+import com.embabel.common.util.EmbabelObjectMapperHolder
 import jakarta.validation.Validator
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.Test
 import org.slf4j.LoggerFactory
@@ -42,7 +48,7 @@ import org.springframework.ai.chat.model.ChatModel
 import org.springframework.ai.chat.model.ChatResponse
 import org.springframework.ai.chat.model.Generation
 import org.springframework.ai.chat.prompt.ChatOptions
-import org.springframework.ai.chat.prompt.DefaultChatOptions
+import org.springframework.ai.model.tool.ToolCallingChatOptions
 import org.springframework.ai.chat.prompt.Prompt
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
@@ -60,10 +66,12 @@ import reactor.core.publisher.Flux
  */
 class FakeStreamingChatModel(
     private val response: String,
-    private val options: ChatOptions = DefaultChatOptions(),
+    // Spring AI 2.0 ToolCallAdvisor requires the ChatClientRequest options to be
+    // ToolCallingChatOptions; the merge is rooted on ChatModel.getOptions().
+    private val options: ChatOptions = ToolCallingChatOptions.builder().build(),
 ) : ChatModel {
 
-    override fun getDefaultOptions(): ChatOptions = options
+    override fun getOptions(): ChatOptions = options
 
     override fun call(prompt: Prompt): ChatResponse {
         return ChatResponse(
@@ -123,14 +131,14 @@ class StreamingTestConfig {
         toolDecorator: ToolDecorator,
         validator: Validator,
         templateRenderer: TemplateRenderer,
-        objectMapper: ObjectMapper,
+        embabelObjectMapperHolder: EmbabelObjectMapperHolder,
     ): LlmOperations {
         return ChatClientLlmOperations(
             modelProvider = modelProvider,
             toolDecorator = toolDecorator,
             validator = validator,
             templateRenderer = templateRenderer,
-            objectMapper = objectMapper,
+            embabelObjectMapperHolder = embabelObjectMapperHolder,
             asyncer = com.embabel.agent.spi.support.ExecutorAsyncer(java.util.concurrent.Executors.newCachedThreadPool()),
         )
     }
@@ -172,6 +180,11 @@ class LLMStreamingIntegrationTest(
 
     private val logger = LoggerFactory.getLogger(LLMStreamingIntegrationTest::class.java)
     private val agentPlatform: AgentPlatform = autonomy.agentPlatform
+
+    @AfterEach
+    fun clearStreamingCapabilityCache() {
+        StreamingCapabilityDetector.clearCache()
+    }
 
     @Test
     fun `test streaming capability detection`() {

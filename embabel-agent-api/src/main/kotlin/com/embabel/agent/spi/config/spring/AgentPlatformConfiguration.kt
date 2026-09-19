@@ -13,32 +13,43 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:OptIn(InternalObservabilityApi::class)
+
 package com.embabel.agent.spi.config.spring
 
 import com.embabel.agent.api.channel.DevNullOutputChannel
 import com.embabel.agent.api.channel.OutputChannel
 import com.embabel.agent.api.common.ranking.Ranker
 import com.embabel.agent.api.event.AgenticEventListener
+import com.embabel.agent.api.event.observation.AgentInstrumentation
+import com.embabel.agent.api.event.observation.InternalObservabilityApi
+import com.embabel.agent.api.event.observation.NoOpAgentInstrumentation
+import com.embabel.agent.core.AgentPlatform
 import com.embabel.agent.core.AgentProcessRepository
 import com.embabel.agent.core.ToolGroup
 import com.embabel.agent.core.internal.LlmOperations
+import com.embabel.agent.core.persistence.BlackboardEntrySerializer
 import com.embabel.agent.spi.*
 import com.embabel.agent.spi.logging.ColorPalette
 import com.embabel.agent.spi.logging.DefaultColorPalette
 import com.embabel.agent.spi.logging.LoggingAgenticEventListener
+import com.embabel.agent.spi.persistence.AgentProcessPersistence
+import com.embabel.agent.spi.persistence.AgentProcessSnapshotStore
 import com.embabel.agent.spi.support.*
+import com.embabel.common.util.EmbabelObjectMapperHolder
 import com.embabel.common.ai.autoconfig.ProviderInitialization
 import com.embabel.common.ai.model.ConfigurableModelProvider
 import com.embabel.common.ai.model.ConfigurableModelProviderProperties
+import com.embabel.common.ai.model.CredentialLlmServiceFactory
 import com.embabel.common.ai.model.EmbeddingService
 import com.embabel.common.ai.model.ModelProvider
+import com.embabel.common.ai.model.RoleResolver
 import com.embabel.common.core.MobyNameGenerator
 import com.embabel.common.core.NameGenerator
 import com.embabel.common.textio.template.JinjavaTemplateRenderer
 import com.embabel.common.textio.template.TemplateRenderer
 import com.embabel.common.util.StringTransformer
 import com.embabel.common.util.loggerFor
-import com.fasterxml.jackson.databind.ObjectMapper
 import io.micrometer.observation.ObservationRegistry
 import org.springframework.beans.factory.ObjectProvider
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
@@ -47,7 +58,6 @@ import org.springframework.context.ApplicationContext
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.context.annotation.Primary
-import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder
 
 
 /**
@@ -58,6 +68,7 @@ import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder
     ConfigurableModelProviderProperties::class,
     AgentPlatformProperties::class,
     ProcessRepositoryProperties::class,
+    AgentProcessPersistenceProperties::class,
 )
 class AgentPlatformConfiguration(
 ) {
@@ -67,6 +78,15 @@ class AgentPlatformConfiguration(
      */
     @Bean
     fun nameGenerator(): NameGenerator = MobyNameGenerator
+
+    /**
+     * Default no-op instrumentation: the core creates no span unless an observability module
+     * contributes a real [AgentInstrumentation] adapter (registered `@Primary`), which then wins
+     * by-type injection and [org.springframework.beans.factory.ObjectProvider.getIfUnique]. Keeping
+     * this bean unconditional (no `@ConditionalOnMissingBean`) makes resolution order-independent.
+     */
+    @Bean
+    fun agentInstrumentation(): AgentInstrumentation = NoOpAgentInstrumentation
 
     @Bean
     fun toolDecorator(
@@ -86,7 +106,9 @@ class AgentPlatformConfiguration(
     }
 
     @Bean
-    fun templateRenderer(): TemplateRenderer = JinjavaTemplateRenderer()
+    @ConditionalOnMissingBean(TemplateRenderer::class)
+    fun templateRenderer(properties: AgentPlatformProperties): TemplateRenderer =
+        JinjavaTemplateRenderer(properties.template)
 
     /**
      * Fallback if we don't have a more interesting logger
@@ -105,10 +127,13 @@ class AgentPlatformConfiguration(
     @ConditionalOnMissingBean(ColorPalette::class)
     fun defaultColorPalette(): ColorPalette = DefaultColorPalette()
 
-    @Bean(defaultCandidate = false)
-    @ConditionalOnMissingBean(name = ["embabelJacksonObjectMapper"])
-    fun embabelJacksonObjectMapper(builder: Jackson2ObjectMapperBuilder): ObjectMapper {
-        return builder.createXmlMapper(false).build()
+    @Bean
+    @ConditionalOnMissingBean
+    fun embabelJacksonObjectMapper(): EmbabelObjectMapperHolder {
+        // The ObjectMapper is deliberately NOT registered as a Spring bean as a defensive mechanism to avoid
+        // ObjectMapper conflicts and simplify provision of own ObjectMapper beans for Embabel.
+        // Instead we expose the EmbabelObjectMapper wrapper and consumers call unwrap() at the point of use.
+        return EmbabelObjectMapperHolder.createDefault()
     }
 
     @Bean
@@ -120,10 +145,48 @@ class AgentPlatformConfiguration(
         rankingProperties = rankingProperties,
     )
 
+    /**
+     * Runtime repository, decorated for durability when the application supplies an
+     * [AgentProcessSnapshotStore]. Without a store this is the in-memory repository
+     * exactly as before, so behaviour is unchanged for applications that add nothing.
+     *
+     * [agentPlatform] is an [ObjectProvider] because the platform depends on this
+     * repository: it is resolved lazily, only while restoring a process.
+     */
     @Bean
     fun agentProcessRepository(
         processRepositoryProperties: ProcessRepositoryProperties,
-    ): AgentProcessRepository = InMemoryAgentProcessRepository(processRepositoryProperties)
+        persistenceProperties: AgentProcessPersistenceProperties,
+        snapshotStore: ObjectProvider<AgentProcessSnapshotStore>,
+        blackboardEntrySerializers: ObjectProvider<BlackboardEntrySerializer>,
+        embabelObjectMapperHolder: EmbabelObjectMapperHolder,
+        agentPlatform: ObjectProvider<AgentPlatform>,
+    ): AgentProcessRepository {
+        val runtimeRepository = InMemoryAgentProcessRepository(processRepositoryProperties)
+        val store = snapshotStore.getIfAvailable()
+        if (store == null || !persistenceProperties.enabled) {
+            loggerFor<AgentPlatformConfiguration>().info(
+                "Agent processes are not durable: {}",
+                if (store == null) "no AgentProcessSnapshotStore bean is defined"
+                else "embabel.agent.platform.persistence.enabled is false",
+            )
+            return runtimeRepository
+        }
+        loggerFor<AgentPlatformConfiguration>().info(
+            "Agent processes are durable: snapshot store [{}], checkpoint policy [{}]",
+            store.javaClass.name,
+            persistenceProperties.checkpointPolicy,
+        )
+        return AgentProcessPersistence.persistentRepository(
+            runtimeRepository = runtimeRepository,
+            snapshotStore = store,
+            objectMapper = embabelObjectMapperHolder.get(),
+            agents = { agentPlatform.getObject().agents() },
+            platformServices = { agentPlatform.getObject().platformServices },
+            checkpointPolicy = persistenceProperties.resolveCheckpointPolicy(),
+            blackboardEntrySerializers = blackboardEntrySerializers.orderedStream().toList(),
+        )
+    }
 
     @Bean
     fun contextRepository(
@@ -178,6 +241,12 @@ class AgentPlatformConfiguration(
             llms = applicationContext.getBeansOfType(LlmService::class.java).values.toList(),
             embeddingServices = applicationContext.getBeansOfType(EmbeddingService::class.java).values.toList(),
             properties = properties,
+            // Ordered, so that one application resolver can take precedence over another
+            roleResolvers = applicationContext.getBeanProvider(RoleResolver::class.java)
+                .orderedStream().toList(),
+            credentialLlmServiceFactories = applicationContext
+                .getBeanProvider(CredentialLlmServiceFactory::class.java)
+                .orderedStream().toList(),
         )
     }
 

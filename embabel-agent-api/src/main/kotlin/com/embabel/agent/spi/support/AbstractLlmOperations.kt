@@ -18,6 +18,7 @@ package com.embabel.agent.spi.support
 import com.embabel.agent.api.common.Asyncer
 import com.embabel.agent.api.event.LlmRequestEvent
 import com.embabel.agent.api.tool.Tool
+import com.embabel.agent.api.tool.ToolControlFlowSignal
 import com.embabel.agent.core.Action
 import com.embabel.agent.core.AgentProcess
 import com.embabel.agent.core.internal.LlmOperations
@@ -34,17 +35,20 @@ import com.embabel.agent.spi.validation.ValidationPromptGenerator
 import com.embabel.chat.Message
 import com.embabel.chat.UserMessage
 import com.embabel.common.ai.model.AutoModelSelectionCriteria
+import com.embabel.common.ai.model.ByRoleModelSelectionCriteria
 import com.embabel.common.ai.model.LlmOptions
 import com.embabel.common.ai.model.ModelProvider
 import com.embabel.common.ai.model.ModelSelectionCriteria
 import com.embabel.common.ai.model.PreResolvedModelSelectionCriteria
 import com.embabel.common.core.thinking.ThinkingResponse
 import com.embabel.common.util.time
-import com.fasterxml.jackson.databind.ObjectMapper
+import tools.jackson.databind.ObjectMapper
 import jakarta.validation.ConstraintViolation
 import jakarta.validation.Validator
 import java.lang.reflect.Field
 import java.time.Duration
+import java.time.Instant
+import java.util.Locale
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -107,9 +111,9 @@ abstract class AbstractLlmOperations(
             future.get(timeoutMillis, TimeUnit.MILLISECONDS)
         } catch (e: TimeoutException) {
             future.cancel(true)
-            logger.warn(LLM_TIMEOUT_MESSAGE, interactionId, attempt, timeoutMillis)
+            logger.warn(LLM_TIMEOUT_MESSAGE, interactionId, attempt, "%,d".format(Locale.ROOT, timeoutMillis))
             throw RuntimeException(
-                "LLM call for interaction $interactionId timed out after ${timeoutMillis}ms",
+                "LLM call for interaction $interactionId timed out after ${"%,d".format(Locale.ROOT, timeoutMillis)}ms",
                 e
             )
         } catch (e: InterruptedException) {
@@ -136,6 +140,106 @@ abstract class AbstractLlmOperations(
         }
     }
 
+    /**
+     * The attempts made in one logical LLM call. Each runs under the data binding retry policy,
+     * which forgives transient failures such as malformed JSON, and the configured timeout.
+     * Publishes an [com.embabel.agent.api.event.LlmRetryEvent] as each retry begins.
+     *
+     * A retry is reported when it actually happens rather than when the attempt before it fails,
+     * so no event has to guess whether the policy will allow another attempt.
+     */
+    private inner class Attempts(
+        private val llmRequestEvent: LlmRequestEvent<*>,
+        private val interaction: LlmInteraction,
+    ) {
+        /** Round trips made to the model in this call, counted across every [attempt] block it runs. */
+        var made: Int = 0
+            private set
+
+        /**
+         * Round trips this call is allowed, counted the same way. Every [attempt] block runs its own
+         * retry sequence with its own budget, so the budget grows as blocks start. Counting both the
+         * same way keeps [made] and [maxAttempts] describing the same thing: the whole call.
+         */
+        var maxAttempts: Int = 0
+            private set
+
+        /** How long the last failed attempt took, excluding the backoff wait that follows it. */
+        private var lastFailure: Duration = Duration.ZERO
+
+        fun <O> attempt(operation: () -> O): O {
+            maxAttempts += dataBindingProperties.maxAttempts
+            return dataBindingProperties.retryTemplate(interaction.id.value)
+                .execute<O, Exception> { context ->
+                    // Null until an attempt has failed, so this fires only on a real retry
+                    context.lastThrowable?.let { lastThrowable ->
+                        llmRequestEvent.agentProcess.processContext.onProcessEvent(
+                            llmRequestEvent.retryEvent(
+                                throwable = lastThrowable,
+                                attempts = made,
+                                maxAttempts = maxAttempts,
+                                runningTime = lastFailure,
+                            )
+                        )
+                    }
+                    made++
+                    val attemptStarted = Instant.now()
+                    try {
+                        executeWithTimeout(
+                            interactionId = interaction.id.value,
+                            llmOptions = interaction.llm,
+                            attempt = made,
+                            operation = operation,
+                        )
+                    } catch (t: Throwable) {
+                        // Timed here, not at the next callback, which only runs after the backoff wait
+                        lastFailure = Duration.between(attemptStarted, Instant.now())
+                        throw t
+                    }
+                }
+        }
+    }
+
+    /**
+     * Run one logical LLM call, publishing an [com.embabel.agent.api.event.LlmCallFailedEvent] if it
+     * ends without a response. [call] makes each round trip through [Attempts.attempt], so a failure
+     * anywhere in the call - an exhausted retry, or a response that never passes validation - is
+     * reported once, counting every round trip the call made.
+     */
+    private fun <O> withFailureEvents(
+        llmRequestEvent: LlmRequestEvent<*>,
+        interaction: LlmInteraction,
+        call: Attempts.() -> O,
+    ): O {
+        val attempts = Attempts(llmRequestEvent, interaction)
+        return try {
+            attempts.call()
+        } catch (e: Exception) {
+            // Exception, not Throwable: an Error means the JVM is in trouble (out of memory, stack
+            // exhausted). Calling listeners then can turn a bad situation into a worse one, and the
+            // listener would have nothing useful to do with it anyway. Errors propagate untouched.
+            // Control flow signals such as ReplanRequestedException end the call without failing it
+            if (e !is ToolControlFlowSignal) {
+                llmRequestEvent.agentProcess.processContext.onProcessEvent(
+                    llmRequestEvent.failureEvent(
+                        throwable = e,
+                        attempts = attempts.made,
+                        maxAttempts = attempts.maxAttempts,
+                        runningTime = Duration.between(llmRequestEvent.timestamp, Instant.now()),
+                    )
+                )
+            }
+            throw e
+        }
+    }
+
+    /** A call that is a single round trip to the model. */
+    private fun <O> withRetry(
+        llmRequestEvent: LlmRequestEvent<*>,
+        interaction: LlmInteraction,
+        operation: () -> O,
+    ): O = withFailureEvents(llmRequestEvent, interaction) { attempt(operation) }
+
     final override fun <O> createObject(
         messages: List<Message>,
         interaction: LlmInteraction,
@@ -143,6 +247,14 @@ abstract class AbstractLlmOperations(
         agentProcess: AgentProcess,
         action: Action?,
     ): O {
+        // Shadowed deliberately. After this line the resolved interaction IS the interaction for
+        // the rest of the method, and shadowing makes the unresolved one unreachable. A distinct
+        // name would leave both in scope, differing only in whether a role has become a concrete
+        // model plus its hyperparameters - and picking the wrong one is not a compile error, it is
+        // a call that silently skips role resolution and runs on the default model.
+        @Suppress("NAME_SHADOWING")
+        val interaction = withRoleResolved(interaction)
+
         val (allTools, llmRequestEvent) = getToolsAndEvent(
             agentProcess = agentProcess,
             interaction = interaction,
@@ -178,58 +290,48 @@ abstract class AbstractLlmOperations(
                     messages
                 }
 
-            // Wrap doTransform with retry for transient failures (e.g., malformed JSON)
-            // and timeout for operations that take too long
-            var candidate = dataBindingProperties.retryTemplate(interaction.id.value)
-                .execute<O, Exception> {
-                    executeWithTimeout(
-                        interactionId = interaction.id.value,
-                        llmOptions = interaction.llm,
-                    ) {
-                        doTransform(
-                            messages = initialMessages,
-                            interaction = interactionWithToolDecoration,
-                            outputClass = outputClass,
-                            llmRequestEvent = llmRequestEvent,
-                        )
-                    }
+            // Binding and validation are one LLM call: a response that never validates is a
+            // failure of that call, reported like an exhausted retry.
+            withFailureEvents(llmRequestEvent, interaction) {
+                var candidate = attempt {
+                    doTransform(
+                        messages = initialMessages,
+                        interaction = interactionWithToolDecoration,
+                        outputClass = outputClass,
+                        llmRequestEvent = llmRequestEvent,
+                    )
                 }
-            if (interaction.validation) {
-                var constraintViolations = validator.validate(candidate)
-                constraintViolations =
-                    filterConstraintViolations(constraintViolations, outputClass, interaction.fieldFilter)
-                if (constraintViolations.isNotEmpty()) {
-                    // If we had violations, try again, once, before throwing an exception
-                    candidate = dataBindingProperties.retryTemplate(interaction.id.value)
-                        .execute<O, Exception> {
-                            executeWithTimeout(
-                                interactionId = interaction.id.value,
-                                llmOptions = interaction.llm,
-                            ) {
-                                doTransform(
-                                    messages = messages + UserMessage(
-                                        validationPromptGenerator.generateViolationsReport(
-                                            constraintViolations
-                                        )
-                                    ),
-                                    interaction = interactionWithToolDecoration,
-                                    outputClass = outputClass,
-                                    llmRequestEvent = llmRequestEvent,
-                                )
-                            }
-                        }
-                    constraintViolations = validator.validate(candidate)
+                if (interaction.validation) {
+                    var constraintViolations = validator.validate(candidate)
                     constraintViolations =
                         filterConstraintViolations(constraintViolations, outputClass, interaction.fieldFilter)
                     if (constraintViolations.isNotEmpty()) {
-                        throw InvalidLlmReturnTypeException(
-                            returnedObject = candidate as Any,
-                            constraintViolations = constraintViolations,
-                        )
+                        // If we had violations, try again, once, before throwing an exception
+                        candidate = attempt {
+                            doTransform(
+                                messages = messages + UserMessage(
+                                    validationPromptGenerator.generateViolationsReport(
+                                        constraintViolations
+                                    )
+                                ),
+                                interaction = interactionWithToolDecoration,
+                                outputClass = outputClass,
+                                llmRequestEvent = llmRequestEvent,
+                            )
+                        }
+                        constraintViolations = validator.validate(candidate)
+                        constraintViolations =
+                            filterConstraintViolations(constraintViolations, outputClass, interaction.fieldFilter)
+                        if (constraintViolations.isNotEmpty()) {
+                            throw InvalidLlmReturnTypeException(
+                                returnedObject = candidate as Any,
+                                constraintViolations = constraintViolations,
+                            )
+                        }
                     }
                 }
+                candidate
             }
-            candidate
         }
         logger.debug("LLM createdObject response={}", createdObject)
         agentProcess.processContext.onProcessEvent(
@@ -259,6 +361,14 @@ abstract class AbstractLlmOperations(
         agentProcess: AgentProcess,
         action: Action?,
     ): Result<O> {
+        // Shadowed deliberately. After this line the resolved interaction IS the interaction for
+        // the rest of the method, and shadowing makes the unresolved one unreachable. A distinct
+        // name would leave both in scope, differing only in whether a role has become a concrete
+        // model plus its hyperparameters - and picking the wrong one is not a compile error, it is
+        // a call that silently skips role resolution and runs on the default model.
+        @Suppress("NAME_SHADOWING")
+        val interaction = withRoleResolved(interaction)
+
         val (allTools, llmRequestEvent) = getToolsAndEvent(
             agentProcess = agentProcess,
             interaction = interaction,
@@ -279,20 +389,14 @@ abstract class AbstractLlmOperations(
         )
 
         val (response, ms) = time {
-            dataBindingProperties.retryTemplate(interaction.id.value)
-                .execute<Result<O>, Exception> {
-                    executeWithTimeout(
-                        interactionId = interaction.id.value,
-                        llmOptions = interaction.llm,
-                    ) {
-                        doTransformIfPossible(
-                            messages = messages,
-                            interaction = interactionWithToolDecoration,
-                            outputClass = outputClass,
-                            llmRequestEvent = llmRequestEvent,
-                        )
-                    }
-                }
+            withRetry(llmRequestEvent, interaction) {
+                doTransformIfPossible(
+                    messages = messages,
+                    interaction = interactionWithToolDecoration,
+                    outputClass = outputClass,
+                    llmRequestEvent = llmRequestEvent,
+                )
+            }
         }
         logger.debug("LLM createObjectIfPossible response={}", response)
         agentProcess.processContext.onProcessEvent(
@@ -311,6 +415,14 @@ abstract class AbstractLlmOperations(
         agentProcess: AgentProcess,
         action: Action?,
     ): ThinkingResponse<O> {
+        // Shadowed deliberately. After this line the resolved interaction IS the interaction for
+        // the rest of the method, and shadowing makes the unresolved one unreachable. A distinct
+        // name would leave both in scope, differing only in whether a role has become a concrete
+        // model plus its hyperparameters - and picking the wrong one is not a compile error, it is
+        // a call that silently skips role resolution and runs on the default model.
+        @Suppress("NAME_SHADOWING")
+        val interaction = withRoleResolved(interaction)
+
         val (allTools, llmRequestEvent) = getToolsAndEvent(
             agentProcess = agentProcess,
             interaction = interaction,
@@ -331,20 +443,14 @@ abstract class AbstractLlmOperations(
         )
 
         val (thinkingResponse, ms) = time {
-            dataBindingProperties.retryTemplate(interaction.id.value)
-                .execute<ThinkingResponse<O>, Exception> {
-                    executeWithTimeout(
-                        interactionId = interaction.id.value,
-                        llmOptions = interaction.llm,
-                    ) {
-                        doTransformWithThinking(
-                            messages = messages,
-                            interaction = interactionWithToolDecoration,
-                            outputClass = outputClass,
-                            llmRequestEvent = llmRequestEvent,
-                        )
-                    }
-                }
+            withRetry(llmRequestEvent, interaction) {
+                doTransformWithThinking(
+                    messages = messages,
+                    interaction = interactionWithToolDecoration,
+                    outputClass = outputClass,
+                    llmRequestEvent = llmRequestEvent,
+                )
+            }
         }
         logger.debug("LLM thinking response={}", thinkingResponse)
         agentProcess.processContext.onProcessEvent(
@@ -363,6 +469,14 @@ abstract class AbstractLlmOperations(
         agentProcess: AgentProcess,
         action: Action?,
     ): Result<ThinkingResponse<O>> {
+        // Shadowed deliberately. After this line the resolved interaction IS the interaction for
+        // the rest of the method, and shadowing makes the unresolved one unreachable. A distinct
+        // name would leave both in scope, differing only in whether a role has become a concrete
+        // model plus its hyperparameters - and picking the wrong one is not a compile error, it is
+        // a call that silently skips role resolution and runs on the default model.
+        @Suppress("NAME_SHADOWING")
+        val interaction = withRoleResolved(interaction)
+
         val (allTools, llmRequestEvent) = getToolsAndEvent(
             agentProcess = agentProcess,
             interaction = interaction,
@@ -383,20 +497,14 @@ abstract class AbstractLlmOperations(
         )
 
         val (response, ms) = time {
-            dataBindingProperties.retryTemplate(interaction.id.value)
-                .execute<Result<ThinkingResponse<O>>, Exception> {
-                    executeWithTimeout(
-                        interactionId = interaction.id.value,
-                        llmOptions = interaction.llm,
-                    ) {
-                        doTransformWithThinkingIfPossible(
-                            messages = messages,
-                            interaction = interactionWithToolDecoration,
-                            outputClass = outputClass,
-                            llmRequestEvent = llmRequestEvent,
-                        )
-                    }
-                }
+            withRetry(llmRequestEvent, interaction) {
+                doTransformWithThinkingIfPossible(
+                    messages = messages,
+                    interaction = interactionWithToolDecoration,
+                    outputClass = outputClass,
+                    llmRequestEvent = llmRequestEvent,
+                )
+            }
         }
         logger.debug("LLM createObjectIfPossibleWithThinking response={}", response)
         agentProcess.processContext.onProcessEvent(
@@ -407,6 +515,33 @@ abstract class AbstractLlmOperations(
         )
         return response
     }
+
+    /**
+     * Resolve any role named by this interaction before anything reads its options: a role can
+     * carry hyperparameters, and which model it means depends on the provider active for this call.
+     *
+     * Interactions naming no role are returned untouched, so the common path costs nothing.
+     *
+     * Idempotent, so a subclass may call it on a path this class has already resolved: resolution
+     * replaces the role criteria with a pre-resolved one, and a second call sees no role and does
+     * nothing. That is what lets the low-level `doTransform` entry points resolve for themselves
+     * without double-resolving the `createObject` path that reaches them.
+     */
+    protected fun withRoleResolved(interaction: LlmInteraction): LlmInteraction {
+        val resolved = withRoleResolved(interaction.llm)
+        return if (resolved === interaction.llm) interaction else interaction.copy(llm = resolved)
+    }
+
+    /**
+     * As above, for the paths that carry options rather than a whole interaction - streaming,
+     * and the capability queries that pick a model without running a prompt.
+     */
+    private fun withRoleResolved(options: LlmOptions): LlmOptions =
+        if (options.criteria is ByRoleModelSelectionCriteria) {
+            modelProvider.resolveLlmOptions(options)
+        } else {
+            options
+        }
 
     protected fun chooseLlm(
         llmOptions: LlmOptions,
@@ -425,13 +560,22 @@ abstract class AbstractLlmOperations(
     }
 
     override fun supportsStreaming(options: LlmOptions): Boolean {
-        val llmService = chooseLlm(options)
+        val llmService = chooseLlm(withRoleResolved(options))
         return llmService.supportsStreaming()
     }
 
+    override fun supportsThinking(options: LlmOptions): Boolean {
+        val llmService = chooseLlm(withRoleResolved(options))
+        return llmService.supportsThinking()
+    }
+
     override fun createStreamingOperations(options: LlmOptions): StreamingLlmOperations {
-        val llmService = chooseLlm(options)
-        val messageStreamer = llmService.createMessageStreamer(options)
+        // Resolve once and stream with the SAME options. The streamer reads hyperparameters, so
+        // resolving only far enough to pick a model would silently drop the tuning a role carries -
+        // and streaming is the chat path, where that tuning matters most.
+        val resolved = withRoleResolved(options)
+        val llmService = chooseLlm(resolved)
+        val messageStreamer = llmService.createMessageStreamer(resolved)
         return StreamingLlmOperationsImpl(
             messageStreamer = messageStreamer,
             objectMapper = objectMapper,
